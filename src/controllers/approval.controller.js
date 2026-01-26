@@ -10,9 +10,12 @@ import {
   sendSubmissionNotificationToApprover, 
   sendFinalApprovalNotificationToSubmitter,
   sendApprovalStatusNotificationToPlant,
-  sendRejectionNotificationToSubmitter
+  sendRejectionNotificationToSubmitter,
+  sendFinalApprovalNotificationToPlant
 } from "../services/email.service.js";
 import crypto from "crypto";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
+import mongoose from "mongoose";
 
 /* ======================================================
    APPROVAL TASK (INTERNAL WORKFLOW)
@@ -274,24 +277,39 @@ export const getAssignedSubmissions = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { plantId, companyId } = req.user;
+    
+    // Generate cache key
+    const cacheKey = generateCacheKey('employee-assigned-submissions', { userId, plantId });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
 
-    // Find forms where this user is an approver at any level
+    // Optimized approach: Get all forms where user is an approver or plant forms with no approval flow
     const formsWithUserAsApprover = await Form.find({
       "approvalFlow.approverId": userId
-    });
-
+    }).select("_id").lean();
+    
     const formIds = formsWithUserAsApprover.map(f => f._id);
-
-    // Also get forms from user's plant that have no approval flow (they can approve directly)
+    
+    // Get forms from user's plant that have no approval flow
     const formsWithoutFlow = await Form.find({
       plantId,
       $or: [
         { approvalFlow: { $exists: false } },
         { approvalFlow: { $size: 0 } }
       ]
-    });
+    }).select("_id").lean();
     
     const allFormIds = [...formIds, ...formsWithoutFlow.map(f => f._id)];
+    
+    if (allFormIds.length === 0) {
+      const result = [];
+      await setInCache(cacheKey, result, 120);
+      return res.json(result);
+    }
 
     // Find submissions for these forms that are currently in progress
     const submissions = await FormSubmission.find({
@@ -300,25 +318,18 @@ export const getAssignedSubmissions = async (req, res) => {
     })
     .populate("templateId", "formName approvalFlow")
     .populate("submittedBy", "name email")
-    .populate({
-      path: "templateId",
-      populate: {
-        path: "approvalFlow.approverId",
-        select: "name email"
-      }
-    })
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean();
 
     // Enhance submissions with "isMyTurn" and "pendingApprover" info
     const enhancedSubmissions = submissions.map(sub => {
-      const subObj = sub.toObject();
       const template = sub.templateId;
       const flow = template?.approvalFlow || [];
       
       // If no approval flow, it's always the user's turn
       if (flow.length === 0) {
         return {
-          ...subObj,
+          ...sub,
           isMyTurn: true,
           userLevel: 1,
           pendingApproverName: null
@@ -343,12 +354,15 @@ export const getAssignedSubmissions = async (req, res) => {
       }
 
       return {
-        ...subObj,
+        ...sub,
         isMyTurn,
         userLevel,
         pendingApproverName
       };
     });
+    
+    // Cache the result for 2 minutes
+    await setInCache(cacheKey, enhancedSubmissions, 120);
 
     res.json(enhancedSubmissions);
   } catch (error) {
@@ -552,20 +566,55 @@ export const processApproval = async (req, res) => {
           const formId = (form?.numericalId || submission.formNumericalId)?.toString() || form?.formId || form?._id?.toString() || "";
           const submissionId = submission.numericalId?.toString() || submission._id?.toString() || "";
           
-          await sendApprovalStatusNotificationToPlant(
-            plant.adminId.email,
-            form.formName || form.templateName,
-            submitter?.name || "An employee",
-            approver?.name || "An approver",
-            status,
-            comments || "",
-            viewLink,
-            company,
-            plant,
-            plantId,
-            formId,
-            submissionId
-          );
+          // Check if this is the final approval
+          const isFinalApproval = submission.status === "APPROVED" && submission.currentLevel === (flow.length + 1);
+          
+          if (isFinalApproval) {
+            // Send final approval notification to plant admin only (submitter is already notified separately)
+            try {
+              // Populate history with approver names for plant admin notification
+              const historyWithNames = await Promise.all(submission.approvalHistory.map(async (h) => {
+                const approver = await User.findById(h.approverId);
+                return {
+                  name: approver?.name || "Approver",
+                  date: h.actionedAt,
+                  comments: h.comments
+                };
+              }));
+              
+              // Notify plant admin of final approval
+              await sendFinalApprovalNotificationToPlant(
+                plant.adminId.email,  // Send to plant admin
+                form.formName || form.templateName,
+                submission.createdAt,
+                historyWithNames, // Pass populated approval history
+                company,
+                plant,
+                plantId,
+                formId,
+                submissionId
+              );
+            } catch (emailError) {
+              console.error("Failed to send final approval notification to plant admin:", emailError);
+            }
+          } else {
+            // Send regular approval status notification for intermediate approvals
+            await sendApprovalStatusNotificationToPlant(
+              plant.adminId.email,
+              form.formName || form.templateName,
+              submitter?.name || "An employee",
+              approver?.name || "An approver",
+              status,
+              comments || "",
+              viewLink,
+              company,
+              plant,
+              plantId,
+              formId,
+              submissionId,
+              submission.currentLevel || 1
+            );
+          }
         }
       } catch (emailErr) {
         console.error("Failed to send plant admin approval notification:", emailErr);
@@ -583,34 +632,61 @@ export const processApproval = async (req, res) => {
 export const getEmployeeStats = async (req, res) => {
   try {
     const userId = req.user.userId;
-
-    // All forms where user is an approver
-    const formsWithUserAsApprover = await Form.find({
-      "approvalFlow.approverId": userId
-    });
-    const formIds = formsWithUserAsApprover.map(f => f._id);
     
-    // Submissions pending approval where it's actually this user's turn
-    const allInProgSubmissions = await FormSubmission.find({
-      templateId: { $in: formIds },
-      status: { $in: ["PENDING_APPROVAL", "IN_PROGRESS", "in_progress", "SUBMITTED"] }
-    }).populate("templateId", "approvalFlow");
+    // Generate cache key
+    const cacheKey = generateCacheKey('employee-stats', { userId });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
 
-    const pendingCount = allInProgSubmissions.filter(sub => {
-      const flow = sub.templateId?.approvalFlow || [];
-      const userLevel = flow.find(f => f.approverId.toString() === userId.toString())?.level;
-      return sub.currentLevel === userLevel;
-    }).length;
+    // Optimized query using aggregation pipeline
+    const pendingCount = await FormSubmission.aggregate([
+      {
+        $lookup: {
+          from: "forms",
+          localField: "templateId",
+          foreignField: "_id",
+          as: "form"
+        }
+      },
+      { $unwind: "$form" },
+      {
+        $match: {
+          "form.approvalFlow.approverId": new mongoose.Types.ObjectId(userId),
+          status: { $in: ["PENDING_APPROVAL", "IN_PROGRESS", "in_progress", "SUBMITTED"] },
+          $expr: {
+            $and: [
+              { $eq: ["$currentLevel", {
+                $arrayElemAt: [
+                  "$form.approvalFlow.level",
+                  { $indexOfArray: ["$form.approvalFlow.approverId", new mongoose.Types.ObjectId(userId)] }
+                ]
+              }]},
+              { $ne: ["$currentLevel", null] }
+            ]
+          }
+        }
+      },
+      { $count: "pendingCount" }
+    ]).then(result => result[0]?.pendingCount || 0);
 
     // Submissions already actioned by this user
     const actionedCount = await FormSubmission.countDocuments({
       "approvalHistory.approverId": userId
     });
-
-    res.json({
+    
+    const result = {
       pendingCount,
       actionedCount
-    });
+    };
+    
+    // Cache the result for 2 minutes
+    await setInCache(cacheKey, result, 120);
+
+    res.json(result);
   } catch (error) {
     console.error("Get employee stats error:", error);
     res.status(500).json({ message: "Failed to fetch employee stats" });

@@ -4,6 +4,7 @@ import Company from "../models/Company.model.js";
 import bcrypt from "bcryptjs";
 import { validatePlantCreation } from "../utils/planLimits.js";
 import { sendWelcomeEmail, sendPlantCreatedEmail } from "../services/email.service.js";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 const generatePlantCode = () =>
   "PLT-" + Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -99,7 +100,31 @@ export const getPlants = async (req, res) => {
       filter.companyId = req.query.companyId;
     }
 
-    const plants = await Plant.find(filter).sort({ createdAt: -1 });
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheParams = { page, limit };
+    if (filter.companyId) cacheParams.companyId = filter.companyId;
+    if (filter._id) cacheParams.plantId = filter._id;
+    const cacheKey = generateCacheKey('plants', cacheParams);
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+
+    // Count total plants for pagination metadata
+    const total = await Plant.countDocuments(filter);
+
+    // Get paginated plants
+    const plants = await Plant.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
     
     const data = await Promise.all(
       plants.map(async (plant) => {
@@ -111,8 +136,22 @@ export const getPlants = async (req, res) => {
         };
       })
     );
+    
+    const result = {
+      data,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
 
-    res.json(data);
+    res.json(result);
   } catch (error) {
     console.error("Get plants error:", error);
     res.status(500).json({ message: "Failed to fetch plants" });

@@ -1,54 +1,47 @@
 import mongoose from "mongoose";
 
+const approvalHistorySchema = new mongoose.Schema({
+  approverId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  level: { type: Number, required: true },
+  status: { type: String, enum: ["APPROVED", "REJECTED"], required: true },
+  comments: String,
+  approvedAt: { type: Date, default: Date.now }
+});
+
 const formSubmissionSchema = new mongoose.Schema({
-  templateId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    required: true, 
-    index: true,
-    refPath: 'templateModel'
-  },
-  templateModel: {
-    type: String,
-    required: true,
-    enum: ['FormTemplate', 'Form'],
-    default: 'FormTemplate'
-  },
-  templateName: { type: String }, // Snapshot of template name at time of submission
-  numericalId: { type: Number, unique: true, sparse: true },
-  formNumericalId: { type: Number, index: true }, // Reference to form's numerical ID
-  assignmentId: { type: mongoose.Schema.Types.ObjectId, ref: "Assignment", index: true },
-  plantId: { type: mongoose.Schema.Types.ObjectId, ref: "Plant", index: true },
-  companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", index: true },
-  submittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+  templateId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  templateModel: { type: String, enum: ["Form", "FormTemplate"], default: "Form" },
+  templateName: { type: String, required: true },
+  submittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  submittedByName: { type: String, required: true },
+  submittedByEmail: { type: String, required: true },
+  submittedAt: { type: Date, default: Date.now },
   data: { type: mongoose.Schema.Types.Mixed, required: true },
-  files: [{
-    fieldId: String,
-    filename: String,
-    originalName: String,
-    path: String,
-    mimetype: String,
-    size: Number
-  }],
   status: { 
     type: String, 
-    enum: ["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED", "SUBMITTED"], 
-    default: "PENDING_APPROVAL",
-    index: true
+    enum: ["PENDING_APPROVAL", "APPROVED", "REJECTED", "IN_PROGRESS", "SUBMITTED"], 
+    default: "PENDING_APPROVAL" 
   },
   currentLevel: { type: Number, default: 1 },
-  approvalHistory: [{
-    level: { type: Number },
-    approverId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    status: { type: String, enum: ["APPROVED", "REJECTED", "SUBMITTED"] },
-    comments: { type: String },
-    actionedAt: { type: Date, default: Date.now }
-  }],
-  submittedAt: { type: Date, default: Date.now, index: true },
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company", required: true },
+  plantId: { type: mongoose.Schema.Types.ObjectId, ref: "Plant", required: true },
+  approvalHistory: [approvalHistorySchema],
   approvedAt: { type: Date },
   rejectedAt: { type: Date },
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
 }, { timestamps: true });
+
+// Add indexes for better query performance
+formSubmissionSchema.index({ templateId: 1, status: 1 });
+formSubmissionSchema.index({ submittedBy: 1 });
+formSubmissionSchema.index({ companyId: 1, status: 1 });
+formSubmissionSchema.index({ plantId: 1, status: 1 });
+formSubmissionSchema.index({ status: 1 });
+formSubmissionSchema.index({ submittedAt: -1 });
+formSubmissionSchema.index({ currentLevel: 1, status: 1 });
+formSubmissionSchema.index({ companyId: 1, submittedAt: -1 });
+formSubmissionSchema.index({ plantId: 1, submittedAt: -1 });
 
 // Generate numerical ID before saving
 formSubmissionSchema.pre('save', async function(next) {
@@ -57,17 +50,8 @@ formSubmissionSchema.pre('save', async function(next) {
       const FormSubmissionModel = mongoose.model('FormSubmission');
       const maxSubmission = await FormSubmissionModel.findOne().sort({ numericalId: -1 });
       this.numericalId = maxSubmission && maxSubmission.numericalId ? maxSubmission.numericalId + 1 : 1;
-      
-      // Also store form's numerical ID if available
-      if (this.templateId && this.templateModel === 'Form') {
-        const FormModel = mongoose.model('Form');
-        const form = await FormModel.findById(this.templateId);
-        if (form && form.numericalId) {
-          this.formNumericalId = form.numericalId;
-        }
-      }
     } catch (err) {
-      console.error('Error generating numerical ID:', err);
+      console.error('Error generating numerical ID for submission:', err);
       this.numericalId = Date.now(); // Fallback
     }
   }

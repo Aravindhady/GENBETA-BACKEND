@@ -14,11 +14,11 @@ const fieldSchema = new mongoose.Schema({
 
   required: { type: Boolean, default: false },
   options: [String], // For radio, checkbox, dropdown, multi-select
-  
+
   // Layout & Styling
   width: { type: String, default: "100%" },
   alignment: { type: String, default: "left" },
-  
+
   // Checklist & Table Specific
   question: String,
   rowHeight: { type: String, default: "auto" },
@@ -40,7 +40,7 @@ const fieldSchema = new mongoose.Schema({
   maxFileSize: { type: Number, default: 5 },
   fields: [String], // For auto-user fields selection
   format: String, // For auto-date format
-  
+
   // Additional field properties
   placeholder: String,
   min: Number, // For number, range
@@ -76,6 +76,15 @@ const formSchema = new mongoose.Schema({
       description: String
     }]
   }, { timestamps: true });
+
+// Add indexes for better query performance
+formSchema.index({ companyId: 1, isActive: 1 });
+formSchema.index({ plantId: 1, isActive: 1 });
+formSchema.index({ status: 1 });
+formSchema.index({ isTemplate: 1 });
+formSchema.index({ createdAt: -1 });
+formSchema.index({ companyId: 1, status: 1 });
+formSchema.index({ plantId: 1, status: 1 });
 
 // Generate numerical ID before saving
 formSchema.pre('save', async function(next) {

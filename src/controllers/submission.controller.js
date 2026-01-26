@@ -9,6 +9,7 @@ import mongoose from "mongoose";
 import { sendSubmissionNotificationToApprover, sendSubmissionNotificationToPlant } from "../services/email.service.js";
 import { uploadToCloudinary } from "../utils/cloudinary.js";
 import fs from "fs";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 /* ======================================================
    CREATE SUBMISSION
@@ -87,6 +88,10 @@ export const createSubmission = async (req, res) => {
       formNumericalId = template.numericalId;
     }
 
+    // Get user details for submission
+    const userId = submittedBy || req.user?.userId;
+    const user = await User.findById(userId);
+    
     const newSubmission = await FormSubmission.create({
       templateId: template._id,
       templateModel: modelType,
@@ -96,7 +101,9 @@ export const createSubmission = async (req, res) => {
       plantId: plantId || template.plantId || req.user?.plantId,
       companyId: companyId || template.companyId || req.user?.companyId,
       data: parsedData,
-      submittedBy: submittedBy || req.user?.userId,
+      submittedBy: userId,
+      submittedByName: user?.name || "Unknown User",
+      submittedByEmail: user?.email || "unknown@example.com",
       files,
       status: finalStatus,
       currentLevel: finalStatus === "PENDING_APPROVAL" ? 1 : 0
@@ -159,10 +166,10 @@ export const createSubmission = async (req, res) => {
                 );
               }
             }
-      } catch (emailErr) {
-          console.error("Failed to send initial submission notification:", emailErr);
-        }
-      })();
+          } catch (emailErr) {
+            console.error("Failed to send initial submission notification:", emailErr);
+          }
+        })();
     }
 
     // Send notification to plant admin (non-blocking)
@@ -239,34 +246,76 @@ export const getSubmissions = async (req, res) => {
       filter.submittedBy = req.query.submittedBy;
     }
 
-        const submissions = await FormSubmission.find(filter)
-          .populate("templateId", "templateName formName workflow approvalFlow")
-          .populate("approvalHistory.approverId", "name email")
-          .populate("plantId", "name")
-          .populate({
-            path: "submittedBy",
-            model: "User",
-            select: "name email",
-            strictPopulate: false
-          })
-          .sort({ createdAt: -1 });
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheParams = { page, limit, role: req.user.role };
+    if (filter.plantId) cacheParams.plantId = filter.plantId;
+    if (filter.companyId) cacheParams.companyId = filter.companyId;
+    if (filter.templateId) cacheParams.templateId = filter.templateId;
+    if (filter.status) cacheParams.status = filter.status;
+    if (filter.submittedBy) cacheParams.submittedBy = filter.submittedBy;
+    if (req.query.startDate) cacheParams.startDate = req.query.startDate;
+    if (req.query.endDate) cacheParams.endDate = req.query.endDate;
+    const cacheKey = generateCacheKey('submissions', cacheParams);
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
 
-        const enrichedSubmissions = submissions.map(sub => {
-          const subObj = sub.toObject();
-          const lastApproval = subObj.approvalHistory && subObj.approvalHistory.length > 0
-            ? subObj.approvalHistory[subObj.approvalHistory.length - 1]
-            : null;
-          
-            return {
-              ...subObj,
-              templateName: subObj.templateName || subObj.templateId?.templateName || "Unknown Form",
-              plantName: subObj.plantId?.name || "N/A",
-              lastApprovedBy: lastApproval?.approverId?.name || null,
-              lastActionAt: lastApproval?.actionedAt || null
-            };
-        });
+    // Count total submissions for pagination metadata
+    const total = await FormSubmission.countDocuments(filter);
 
-    res.json({ success: true, data: enrichedSubmissions });
+    const submissions = await FormSubmission.find(filter)
+      .populate("templateId", "templateName formName formId numericalId workflow approvalFlow")
+      .populate("approvalHistory.approverId", "name email")
+      .populate("plantId", "name")
+      .populate({
+        path: "submittedBy",
+        model: "User",
+        select: "name email",
+        strictPopulate: false
+      })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const enrichedSubmissions = submissions.map(sub => {
+      const subObj = sub.toObject();
+      const lastApproval = subObj.approvalHistory && subObj.approvalHistory.length > 0
+        ? subObj.approvalHistory[subObj.approvalHistory.length - 1]
+        : null;
+      
+        return {
+          ...subObj,
+          templateName: subObj.templateName || subObj.templateId?.templateName || "Unknown Form",
+          plantName: subObj.plantId?.name || "N/A",
+          lastApprovedBy: lastApproval?.approverId?.name || null,
+          lastActionAt: lastApproval?.actionedAt || null
+        };
+    });
+    
+    const result = { 
+      success: true, 
+      data: enrichedSubmissions,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
+
+    res.json(result);
   } catch (error) {
     console.error("Get submissions error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch submissions" });
@@ -279,7 +328,7 @@ export const getSubmissions = async (req, res) => {
 export const getSubmissionById = async (req, res) => {
   try {
     const submission = await FormSubmission.findById(req.params.id)
-      .populate("templateId")
+      .populate("templateId", "templateName formName formId numericalId workflow approvalFlow")
       .populate("plantId", "name location")
       .populate("companyId", "name")
       .populate("submittedBy", "name email");

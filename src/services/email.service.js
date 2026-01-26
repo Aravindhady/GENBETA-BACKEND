@@ -88,10 +88,14 @@ export const sendApprovalEmail = async (to, formName, link, company = {}, plant 
     <p style="margin-top: 20px; font-size: 12px; color: #6b7280;">If you were not expecting this email, please ignore it.</p>
   `;
 
+  // Extract form ID from formName if it exists
+  const formIdMatch = formName.match(/(\w+-\w+-\d{4}-\w+)/);
+  const formId = formIdMatch ? formIdMatch[1] : 'FORM-ID';
+  
   const mailOptions = {
     from: getFromAddress(),
     to,
-    subject: `Action Required: Form Approval - ${formName}`,
+    subject: `[Approval Required] ${formId} – ${formName} | Level 1 Approval`,
     html: getBaseLayout(content, company, plant)
   };
 
@@ -264,11 +268,11 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
     </div>
   `;
 
-  const subject = `${plantId}_${formId}_${formName}`;
+  // Use standardized subject format for employee submission
   const mailOptions = {
     from: getFromAddress(),
     to,
-    subject: subject,
+    subject: `[Form Submitted] ${formId || 'FORM-ID'} – ${formName} | Submitted by ${submitterName}`,
     html: getBaseLayout(content, company, plant)
   };
 
@@ -339,11 +343,10 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
     </div>
   `;
 
-  const subject = `${plantId}_${formId}_${formName}`;
   const mailOptions = {
     from: getFromAddress(),
     to,
-    subject: subject,
+    subject: `[Form Submitted] ${formId || 'FORM-ID'} – ${formName} | Submitted by ${submitterName}`,
     html: getBaseLayout(content, company, plant)
   };
 
@@ -357,7 +360,7 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
   }
 };
 
-export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", level = 1) => {
   const isApproved = status.toUpperCase() === "APPROVED";
   const statusColor = isApproved ? "#10b981" : "#ef4444";
   const statusText = isApproved ? "Approved" : "Rejected";
@@ -379,7 +382,11 @@ export const sendApprovalStatusNotificationToPlant = async (to, formName, submit
     </div>
   `;
 
-  const subject = `${plantId}_${formId}_${formName}`;
+  // Use standardized subject format for approval status
+  const subject = isApproved 
+    ? `[Form Approved] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Approved by ${approverName}`
+    : `[Form Rejected] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Rejected by ${approverName}`;
+  
   const mailOptions = {
     from: getFromAddress(),
     to,
@@ -416,11 +423,11 @@ export const sendRejectionNotificationToSubmitter = async (to, formName, rejecto
     </div>
   `;
 
-  const subject = `${plantId}_${formId}_${formName}`;
+  // Use standardized rejection subject format
   const mailOptions = {
     from: getFromAddress(),
     to,
-    subject: subject,
+    subject: `[Form Rejected] ${formId || 'FORM-ID'} – ${formName} | Rejected at Level 1`,
     html: getBaseLayout(content, company, plant)
   };
 
@@ -496,11 +503,11 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
     </div>
   `;
 
-  const subject = `${plantId}_${formId}_${formName}`;
+  // Use standardized subject format for final approval
   const mailOptions = {
     from: getFromAddress(),
     to,
-    subject: subject,
+    subject: `[Form Fully Approved] ${formId || 'FORM-ID'} – ${formName} | Final Approval Completed`,
     html: getBaseLayout(content, company, plant)
   };
 
@@ -509,6 +516,45 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
     return info;
   } catch (error) {
     console.error("Final approval notification failed:", error);
+    return { messageId: "mock-id", skipped: true };
+  }
+};
+
+export const sendFinalApprovalNotificationToPlant = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+  const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
+  const historyHtml = approvalHistory.map(h => `
+    <li style="margin-bottom: 10px;">
+      <strong>${h.name}</strong> - Approved at ${new Date(h.date).toLocaleString()}
+      ${h.comments ? `<br/><span style="color: #6b7280; font-style: italic;">"${h.comments}"</span>` : ''}
+    </li>
+  `).join('');
+
+  const content = `
+    <h2 style="color: #10b981;">Form Fully Approved</h2>
+    <p style="color: #1f2937; font-size: 16px;">
+      The submission for <strong>${formName}</strong> at ${new Date(submittedAt).toLocaleString()} has been fully verified and approved.
+    </p>
+    ${identifier ? `<p style="color: #6b7280; font-size: 12px; font-family: monospace; background-color: #f3f4f6; padding: 10px; border-radius: 4px; margin: 15px 0;">${identifier}</p>` : ''}
+    <div style="margin: 25px 0;">
+      <h4 style="color: #374151; margin-bottom: 15px;">Approval History:</h4>
+      <ul style="color: #4b5563; padding-left: 20px;">
+        ${historyHtml}
+      </ul>
+    </div>
+  `;
+
+  const mailOptions = {
+    from: getFromAddress(),
+    to,
+    subject: `[Form Fully Approved] ${formId || 'FORM-ID'} – ${formName} | Final Approval Completed`,
+    html: getBaseLayout(content, company, plant)
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    return info;
+  } catch (error) {
+    console.error("Final approval notification to plant failed:", error);
     return { messageId: "mock-id", skipped: true };
   }
 };

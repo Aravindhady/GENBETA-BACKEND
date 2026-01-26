@@ -6,6 +6,7 @@ import Company from "../models/Company.model.js";
 import { sendResponse } from "../utils/response.js";
 import dayjs from "dayjs";
 import mongoose from "mongoose";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 // Helper function to calculate days between dates
 const calculateDays = (startDate, endDate) => {
@@ -84,6 +85,199 @@ export const getApprovalsByEmployee = async (req, res) => {
     sendResponse(res, 200, "Approvals by employee retrieved", results);
   } catch (error) {
     sendResponse(res, 500, "Error fetching approvals by employee", null, error.message);
+  }
+};
+
+// Get approver performance metrics
+export const getApproversPerformance = async (req, res) => {
+  try {
+    const { days = 30, plantId, companyId } = req.query;
+    const { start, end } = getDateRange(parseInt(days));
+
+    // Generate cache key
+    const cacheKey = generateCacheKey('approvers-performance', { 
+      days, 
+      plantId: plantId || 'all', 
+      companyId: companyId || 'all' 
+    });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return sendResponse(res, 200, "Approvers performance retrieved", cachedResult);
+    }
+
+    // Base aggregation pipeline for approver performance
+    const aggregation = [
+      {
+        $match: {
+          "approvalHistory": { $exists: true, $ne: [] },
+          "approvalHistory.actionedAt": { $gte: start, $lte: end }
+        }
+      }
+    ];
+
+    if (plantId) {
+      aggregation[0].$match.plantId = new mongoose.Types.ObjectId(plantId);
+    }
+    if (companyId) {
+      aggregation[0].$match.companyId = new mongoose.Types.ObjectId(companyId);
+    }
+
+    aggregation.push(
+      { $unwind: "$approvalHistory" },
+      {
+        $match: {
+          "approvalHistory.actionedAt": { $gte: start, $lte: end }
+        }
+      },
+      {
+        $group: {
+          _id: "$approvalHistory.approverId",
+          totalActions: { $sum: 1 },
+          approvedCount: { $sum: { $cond: [{ $eq: ["$approvalHistory.status", "APPROVED"] }, 1, 0] } },
+          rejectedCount: { $sum: { $cond: [{ $eq: ["$approvalHistory.status", "REJECTED"] }, 1, 0] } },
+          avgTimeToAction: { $avg: { $subtract: ["$approvalHistory.actionedAt", "$createdAt"] } },
+          latestAction: { $max: "$approvalHistory.actionedAt" }
+        }
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "approver"
+        }
+      },
+      { $unwind: "$approver" },
+      {
+        $project: {
+          _id: 1,
+          approverName: "$approver.name",
+          approverEmail: "$approver.email",
+          totalActions: 1,
+          approvedCount: 1,
+          rejectedCount: 1,
+          approvalRate: {
+            $cond: {
+              if: { $eq: ["$totalActions", 0] },
+              then: 0,
+              else: { $multiply: [{ $divide: ["$approvedCount", "$totalActions"] }, 100] }
+            }
+          },
+          avgTimeToAction: { $divide: ["$avgTimeToAction", 1000 * 60 * 60] }, // Convert to hours
+          latestAction: 1
+        }
+      },
+      { $sort: { totalActions: -1 } }
+    );
+
+    const results = await FormSubmission.aggregate(aggregation);
+
+    // Cache the result for 10 minutes
+    await setInCache(cacheKey, results, 600);
+
+    sendResponse(res, 200, "Approvers performance retrieved", results);
+  } catch (error) {
+    sendResponse(res, 500, "Error fetching approvers performance", null, error.message);
+  }
+};
+
+// Get approver workload distribution
+export const getApproversWorkload = async (req, res) => {
+  try {
+    const { plantId, companyId } = req.query;
+
+    // Generate cache key
+    const cacheKey = generateCacheKey('approvers-workload', { 
+      plantId: plantId || 'all', 
+      companyId: companyId || 'all' 
+    });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return sendResponse(res, 200, "Approvers workload retrieved", cachedResult);
+    }
+
+    // Get all forms with approval flows
+    const formFilter = {};
+    if (plantId) formFilter.plantId = plantId;
+    if (companyId) formFilter.companyId = companyId;
+    
+    const forms = await Form.find(formFilter).select("approvalFlow").lean();
+    
+    // Extract all approvers from all forms
+    const allApprovers = [];
+    forms.forEach(form => {
+      if (form.approvalFlow && Array.isArray(form.approvalFlow)) {
+        form.approvalFlow.forEach(level => {
+          if (level.approverId) {
+            const approverId = level.approverId._id || level.approverId;
+            allApprovers.push(approverId);
+          }
+        });
+      }
+    });
+    
+    // Remove duplicates
+    const uniqueApproverIds = [...new Set(allApprovers)];
+    
+    // Get pending submissions for each approver
+    const workloadResults = [];
+    
+    for (const approverId of uniqueApproverIds) {
+      // Count submissions where this approver is in the approval flow and it's their turn
+      const count = await FormSubmission.aggregate([
+        {
+          $lookup: {
+            from: "forms",
+            localField: "templateId",
+            foreignField: "_id",
+            as: "form"
+          }
+        },
+        { $unwind: "$form" },
+        {
+          $match: {
+            "form.approvalFlow.approverId": new mongoose.Types.ObjectId(approverId),
+            status: { $in: ["PENDING_APPROVAL", "IN_PROGRESS", "in_progress", "SUBMITTED"] },
+            $expr: {
+              $and: [
+                { $eq: ["$currentLevel", {
+                  $arrayElemAt: [
+                    "$form.approvalFlow.level",
+                    { $indexOfArray: ["$form.approvalFlow.approverId", new mongoose.Types.ObjectId(approverId)] }
+                  ]
+                }]},
+                { $ne: ["$currentLevel", null] }
+              ]
+            }
+          }
+        }
+      ]).then(result => result.length || 0);
+      
+      // Get approver details
+      const approver = await User.findById(approverId).select("name email").lean();
+      
+      workloadResults.push({
+        approverId,
+        approverName: approver?.name || "Unknown Approver",
+        approverEmail: approver?.email || "N/A",
+        pendingCount: count
+      });
+    }
+
+    // Sort by pending count descending
+    workloadResults.sort((a, b) => b.pendingCount - a.pendingCount);
+
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, workloadResults, 300);
+
+    sendResponse(res, 200, "Approvers workload retrieved", workloadResults);
+  } catch (error) {
+    console.error('Error in getApproversWorkload:', error);
+    sendResponse(res, 500, "Error fetching approvers workload", null, error.message);
   }
 };
 
@@ -270,61 +464,108 @@ export const getPendingByStage = async (req, res) => {
 export const getPlantWiseStats = async (req, res) => {
   try {
     const { companyId } = req.query;
+    
+    // Generate cache key
+    const cacheKey = generateCacheKey('plant-stats', { companyId: companyId || 'all' });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return sendResponse(res, 200, "Plant-wise statistics retrieved", cachedResult);
+    }
 
     let plantQuery = {};
     if (companyId) {
       plantQuery.companyId = companyId;
     }
 
+    // Get all plants
     const plants = await Plant.find(plantQuery).lean();
+    
+    if (plants.length === 0) {
+      const result = [];
+      await setInCache(cacheKey, result, 300); // Cache for 5 minutes
+      return sendResponse(res, 200, "Plant-wise statistics retrieved", result);
+    }
 
-    const plantStats = await Promise.all(
-      plants.map(async (plant) => {
-        const users = await User.find({ plantId: plant._id }).select("_id");
-        const userIds = users.map(u => u._id);
+    // Get all users grouped by plantId for efficient lookup
+    const plantIds = plants.map(plant => plant._id);
+    const users = await User.find({ plantId: { $in: plantIds } }).select("_id plantId").lean();
+    
+    // Create a map of plantId to user IDs
+    const plantUserMap = {};
+    users.forEach(user => {
+      if (!plantUserMap[user.plantId]) {
+        plantUserMap[user.plantId] = [];
+      }
+      plantUserMap[user.plantId].push(user._id);
+    });
 
-        const [total, pending, approved, rejected] = await Promise.all([
-          FormSubmission.countDocuments({ submittedBy: { $in: userIds } }),
-          FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "pending" }),
-          FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "approved" }),
-          FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "rejected" })
-        ]);
-
-        // Calculate average approval time for this plant
-        const processedSubs = await FormSubmission.find({
-          submittedBy: { $in: userIds },
-          status: { $in: ["approved", "rejected"] }
-        }).select("submittedAt approvedAt rejectedAt").lean();
-
-        const approvalTimes = processedSubs
-          .map(sub => {
-            const endDate = sub.approvedAt || sub.rejectedAt;
-            return endDate ? calculateDays(sub.submittedAt, endDate) : null;
-          })
-          .filter(time => time !== null);
-
-        const avgApprovalTime = approvalTimes.length > 0
-          ? (approvalTimes.reduce((a, b) => a + b, 0) / approvalTimes.length).toFixed(2)
-          : 0;
-
-          return {
-            plantId: plant._id,
-            plantName: plant.name,
-            plantCode: plant.plantCode,
-            location: plant.location,
-          stats: {
-            total,
-            pending,
-            approved,
-            rejected,
-            avgApprovalTime: parseFloat(avgApprovalTime)
+    // Pre-aggregate submission counts by plant
+    const submissionAggregation = await FormSubmission.aggregate([
+      { $match: { submittedBy: { $in: users.map(u => u._id) } } },
+      {
+        $group: {
+          _id: "$plantId",
+          total: { $sum: 1 },
+          pending: { $sum: { $cond: [{ $eq: ["$status", "PENDING_APPROVAL"] }, 1, 0] } },
+          approved: { $sum: { $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0] } },
+          rejected: { $sum: { $cond: [{ $eq: ["$status", "REJECTED"] }, 1, 0] } },
+          processedSubmissions: {
+            $push: {
+              submittedAt: "$submittedAt",
+              approvedAt: "$approvedAt",
+              rejectedAt: "$rejectedAt"
+            }
           }
-        };
-      })
-    );
+        }
+      }
+    ]);
+
+    // Create a map of plantId to aggregated stats
+    const submissionStatsMap = {};
+    submissionAggregation.forEach(stat => {
+      submissionStatsMap[stat._id] = stat;
+    });
+
+    // Calculate average approval time for each plant
+    const plantStats = plants.map(plant => {
+      const userIDs = plantUserMap[plant._id] || [];
+      const stats = submissionStatsMap[plant._id] || { total: 0, pending: 0, approved: 0, rejected: 0, processedSubmissions: [] };
+      
+      // Calculate average approval time
+      const approvalTimes = stats.processedSubmissions
+        .map(sub => {
+          const endDate = sub.approvedAt || sub.rejectedAt;
+          return endDate ? calculateDays(sub.submittedAt, endDate) : null;
+        })
+        .filter(time => time !== null);
+
+      const avgApprovalTime = approvalTimes.length > 0
+        ? (approvalTimes.reduce((a, b) => a + b, 0) / approvalTimes.length).toFixed(2)
+        : 0;
+
+      return {
+        plantId: plant._id,
+        plantName: plant.name,
+        plantCode: plant.code,
+        location: plant.location,
+        stats: {
+          total: stats.total,
+          pending: stats.pending,
+          approved: stats.approved,
+          rejected: stats.rejected,
+          avgApprovalTime: parseFloat(avgApprovalTime)
+        }
+      };
+    });
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, plantStats, 300);
 
     sendResponse(res, 200, "Plant-wise statistics retrieved", plantStats);
   } catch (error) {
+    console.error('Error in getPlantWiseStats:', error);
     sendResponse(res, 500, "Error fetching plant-wise stats", null, error.message);
   }
 };
@@ -352,12 +593,16 @@ export const getDashboardAnalytics = async (req, res) => {
         const { start, end } = getDateRange(parseInt(days));
         let query = { submittedAt: { $gte: start, $lte: end } };
         
+        // Get users once if needed
+        let userIds = [];
         if (filterPlantId) {
-          const users = await User.find({ plantId: filterPlantId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
+          const users = await User.find({ plantId: filterPlantId }).select("_id").lean();
+          userIds = users.map(u => u._id);
+          query.submittedBy = { $in: userIds };
         } else if (filterCompanyId) {
-          const users = await User.find({ companyId: filterCompanyId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
+          const users = await User.find({ companyId: filterCompanyId }).select("_id").lean();
+          userIds = users.map(u => u._id);
+          query.submittedBy = { $in: userIds };
         }
 
         const submissions = await FormSubmission.find(query).select("submittedAt").lean();
@@ -377,12 +622,9 @@ export const getDashboardAnalytics = async (req, res) => {
           submittedAt: { $gte: start, $lte: end }
         };
         
-        if (filterPlantId) {
-          const users = await User.find({ plantId: filterPlantId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
-        } else if (filterCompanyId) {
-          const users = await User.find({ companyId: filterCompanyId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
+        // Use the same userIds from above
+        if (userIds && userIds.length > 0) {
+          query.submittedBy = { $in: userIds };
         }
 
         const submissions = await FormSubmission.find(query)
@@ -409,12 +651,9 @@ export const getDashboardAnalytics = async (req, res) => {
           submittedAt: { $gte: start, $lte: end }
         };
         
-        if (filterPlantId) {
-          const users = await User.find({ plantId: filterPlantId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
-        } else if (filterCompanyId) {
-          const users = await User.find({ companyId: filterCompanyId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
+        // Use the same userIds from above
+        if (userIds && userIds.length > 0) {
+          query.submittedBy = { $in: userIds };
         }
 
         const [approved, rejected, total] = await Promise.all([
@@ -435,12 +674,9 @@ export const getDashboardAnalytics = async (req, res) => {
       // Pending by stage
       (async () => {
         let query = {};
-        if (filterPlantId) {
-          const users = await User.find({ plantId: filterPlantId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
-        } else if (filterCompanyId) {
-          const users = await User.find({ companyId: filterCompanyId }).select("_id");
-          query.submittedBy = { $in: users.map(u => u._id) };
+        // Use the same userIds from above
+        if (userIds && userIds.length > 0) {
+          query.submittedBy = { $in: userIds };
         }
 
         const [pending, approved, rejected] = await Promise.all([
@@ -462,27 +698,62 @@ export const getDashboardAnalytics = async (req, res) => {
         }
 
         const plants = await Plant.find(plantQuery).lean();
-        return Promise.all(
-          plants.map(async (plant) => {
-            const users = await User.find({ plantId: plant._id }).select("_id");
-            const userIds = users.map(u => u._id);
+        
+        if (plants.length === 0) {
+          return [];
+        }
+        
+        // Get all users for the plants
+        const plantIds = plants.map(plant => plant._id);
+        const users = await User.find({ plantId: { $in: plantIds } }).select("_id plantId").lean();
+        
+        // Create a map of plantId to user IDs
+        const plantUserMap = {};
+        users.forEach(user => {
+          if (!plantUserMap[user.plantId]) {
+            plantUserMap[user.plantId] = [];
+          }
+          plantUserMap[user.plantId].push(user._id);
+        });
 
-            const [total, pending, approved, rejected] = await Promise.all([
-              FormSubmission.countDocuments({ submittedBy: { $in: userIds } }),
-              FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "pending" }),
-              FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "approved" }),
-              FormSubmission.countDocuments({ submittedBy: { $in: userIds }, status: "rejected" })
-            ]);
+        // Pre-aggregate submission counts by plant
+        const submissionAggregation = await FormSubmission.aggregate([
+          { $match: { submittedBy: { $in: users.map(u => u._id) } } },
+          {
+            $group: {
+              _id: "$plantId",
+              total: { $sum: 1 },
+              pending: { $sum: { $cond: [{ $eq: ["$status", "PENDING_APPROVAL"] }, 1, 0] } },
+              approved: { $sum: { $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0] } },
+              rejected: { $sum: { $cond: [{ $eq: ["$status", "REJECTED"] }, 1, 0] } }
+            }
+          }
+        ]);
 
-              return {
-                plantId: plant._id,
-                plantName: plant.name,
-                plantCode: plant.plantCode,
-                location: plant.location,
-                stats: { total, pending, approved, rejected }
-              };
-          })
-        );
+        // Create a map of plantId to aggregated stats
+        const submissionStatsMap = {};
+        submissionAggregation.forEach(stat => {
+          submissionStatsMap[stat._id] = stat;
+        });
+
+        // Build the plant stats
+        return plants.map(plant => {
+          const userIDs = plantUserMap[plant._id] || [];
+          const stats = submissionStatsMap[plant._id] || { total: 0, pending: 0, approved: 0, rejected: 0 };
+          
+          return {
+            plantId: plant._id,
+            plantName: plant.name,
+            plantCode: plant.code,
+            location: plant.location,
+            stats: { 
+              total: stats.total, 
+              pending: stats.pending, 
+              approved: stats.approved, 
+              rejected: stats.rejected 
+            }
+          };
+        });
       })(),
 
       // Approvals by employee
@@ -526,12 +797,12 @@ export const getDashboardAnalytics = async (req, res) => {
             }
           },
           { $unwind: "$employee" },
-            {
-              $project: {
-                label: "$employee.name",
-                value: "$count"
-              }
-            },
+          {
+            $project: {
+              label: "$employee.name",
+              value: "$count"
+            }
+          },
           { $sort: { value: -1 } }
         );
 
@@ -596,27 +867,64 @@ export const getSuperAdminAnalytics = async (req, res) => {
       // Company breakdown for table
       (async () => {
         const companies = await Company.find().lean();
-        return Promise.all(companies.map(async (comp) => {
-          const plantsCount = await Plant.countDocuments({ companyId: comp._id });
-          const formsCount = await Form.countDocuments({ companyId: comp._id });
-          const subs = await FormSubmission.find({ companyId: comp._id }).select("status").lean();
+        
+        if (companies.length === 0) {
+          return [];
+        }
+        
+        // Pre-aggregate data for all companies
+        const plantCounts = await Plant.aggregate([
+          { $group: { _id: "$companyId", count: { $sum: 1 } } }
+        ]);
+        
+        const formCounts = await Form.aggregate([
+          { $group: { _id: "$companyId", count: { $sum: 1 } } }
+        ]);
+        
+        const submissionCounts = await FormSubmission.aggregate([
+          { $group: {
+            _id: "$companyId",
+            total: { $sum: 1 },
+            approved: { $sum: { $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0] } },
+            rejected: { $sum: { $cond: [{ $eq: ["$status", "REJECTED"] }, 1, 0] } },
+            pending: { $sum: { $cond: [{ $eq: ["$status", "PENDING_APPROVAL"] }, 1, 0] } }
+          }}
+        ]);
+        
+        // Create maps for quick lookup
+        const plantCountMap = {};
+        plantCounts.forEach(item => {
+          plantCountMap[item._id.toString()] = item.count;
+        });
+        
+        const formCountMap = {};
+        formCounts.forEach(item => {
+          formCountMap[item._id.toString()] = item.count;
+        });
+        
+        const submissionCountMap = {};
+        submissionCounts.forEach(item => {
+          submissionCountMap[item._id.toString()] = item;
+        });
+        
+        return companies.map(comp => {
+          const plantsCount = plantCountMap[comp._id.toString()] || 0;
+          const formsCount = formCountMap[comp._id.toString()] || 0;
+          const subs = submissionCountMap[comp._id.toString()] || { total: 0, approved: 0, rejected: 0, pending: 0 };
           
-          const total = subs.length;
-          const approved = subs.filter(s => s.status === "approved").length;
-          const rejected = subs.filter(s => s.status === "rejected").length;
-          const pending = subs.filter(s => s.status === "pending").length;
-
+          const total = subs.total;
+          
           return {
             companyId: comp._id,
             companyName: comp.name,
             plantsCount,
             formsCount,
             submissionsCount: total,
-            approvedPercent: total > 0 ? parseFloat(((approved / total) * 100).toFixed(1)) : 0,
-            pendingPercent: total > 0 ? parseFloat(((pending / total) * 100).toFixed(1)) : 0,
-            rejectedPercent: total > 0 ? parseFloat(((rejected / total) * 100).toFixed(1)) : 0
+            approvedPercent: total > 0 ? parseFloat(((subs.approved / total) * 100).toFixed(1)) : 0,
+            pendingPercent: total > 0 ? parseFloat(((subs.pending / total) * 100).toFixed(1)) : 0,
+            rejectedPercent: total > 0 ? parseFloat(((subs.rejected / total) * 100).toFixed(1)) : 0
           };
-        }));
+        });
       })(),
       // Submissions over time
       (async () => {

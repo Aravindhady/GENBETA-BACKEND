@@ -42,7 +42,7 @@ export const login = async (req, res) => {
         plantId: user.plantId?._id || user.plantId
       },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" }
+      { expiresIn: "7d" }
     );
 
     res.json({ 

@@ -1,6 +1,7 @@
 import Assignment from "../models/Assignment.model.js";
 import FormTemplate from "../models/FormTemplate.model.js";
 import Form from "../models/Form.model.js";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 export const assignTemplateToEmployees = async (req, res) => {
   try {
@@ -79,6 +80,28 @@ export const getMyAssignments = async (req, res) => {
     if (req.query.status) {
       query.status = req.query.status.toUpperCase();
     }
+    
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheKey = generateCacheKey('employee-assignments', { 
+      userId: req.user.userId, 
+      status: req.query.status || 'all',
+      page, 
+      limit 
+    });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+
+    // Count total assignments for pagination metadata
+    const total = await Assignment.countDocuments(query);
 
     const assignments = await Assignment.find(query)
     .populate({
@@ -86,12 +109,29 @@ export const getMyAssignments = async (req, res) => {
       select: "templateName formName description sections fields workflow status",
       match: { status: { $ne: "ARCHIVED" } }
     })
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
 
     // Filter out assignments where templateId is null (due to ARCHIVED match)
     const activeAssignments = assignments.filter(a => a.templateId);
+    
+    const result = {
+      success: true,
+      data: activeAssignments,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
 
-    res.json({ success: true, data: activeAssignments });
+    res.json(result);
   } catch (error) {
     console.error("Get my assignments error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch assignments" });
@@ -100,12 +140,50 @@ export const getMyAssignments = async (req, res) => {
 
 export const getPlantAssignments = async (req, res) => {
   try {
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheKey = generateCacheKey('plant-assignments', { 
+      plantId: req.user.plantId, 
+      page, 
+      limit 
+    });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+
+    // Count total assignments for pagination metadata
+    const total = await Assignment.countDocuments({ plantId: req.user.plantId });
+
     const assignments = await Assignment.find({ plantId: req.user.plantId })
       .populate("templateId", "templateName formName")
       .populate("employeeId", "name email")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+    
+    const result = {
+      success: true,
+      data: assignments,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
 
-    res.json({ success: true, data: assignments });
+    res.json(result);
   } catch (error) {
     console.error("Get plant assignments error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch plant assignments" });

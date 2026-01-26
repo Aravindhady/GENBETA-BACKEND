@@ -21,4 +21,13 @@ const userSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 
+// Add indexes for better query performance
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ companyId: 1 });
+userSchema.index({ plantId: 1 });
+userSchema.index({ isActive: 1 });
+userSchema.index({ role: 1, companyId: 1 });
+userSchema.index({ role: 1, plantId: 1 });
+
 export default mongoose.model("User", userSchema);

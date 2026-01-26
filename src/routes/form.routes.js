@@ -4,7 +4,9 @@ import {
   getForms,
   getFormById,
   updateForm,
-  deleteForm
+  deleteForm,
+  archiveForm,
+  restoreForm
 } from "../controllers/form.controller.js";
 import { sendLink } from "../controllers/approval.controller.js";
 import { auth } from "../middlewares/auth.middleware.js";
@@ -19,5 +21,9 @@ router.put("/:id", auth, authorize(["PLANT_ADMIN"]), updateForm);
 router.delete("/:id", auth, authorize(["PLANT_ADMIN"]), deleteForm);
 
 router.post("/:id/send-link", auth, authorize(["PLANT_ADMIN"]), sendLink);
+
+// Archive/Restore routes
+router.patch("/:id/archive", auth, authorize(["PLANT_ADMIN"]), archiveForm);
+router.patch("/:id/restore", auth, authorize(["PLANT_ADMIN"]), restoreForm);
 
 export default router;

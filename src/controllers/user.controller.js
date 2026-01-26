@@ -4,6 +4,86 @@ import bcrypt from "bcryptjs";
 import { validateEmployeeCreation } from "../utils/planLimits.js";
 import { sendWelcomeEmail, sendProfileUpdateNotification } from "../services/email.service.js";
 import Plant from "../models/Plant.model.js";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
+
+export const getUsers = async (req, res) => {
+  try {
+    const filter = { isActive: { $ne: false } };
+
+    // Role-based filtering
+    if (req.user.role === "PLANT_ADMIN") {
+      filter.plantId = req.user.plantId;
+    } else if (req.user.role === "COMPANY_ADMIN") {
+      filter.companyId = req.user.companyId;
+    } else if (req.user.role === "SUPER_ADMIN") {
+      // SUPER_ADMIN can see all users, but allow filtering by companyId or plantId
+      if (req.query.companyId) filter.companyId = req.query.companyId;
+      if (req.query.plantId) filter.plantId = req.query.plantId;
+    } else {
+      // Regular users can only see themselves
+      filter._id = req.user.userId;
+    }
+
+    // Additional filters
+    if (req.query.role) filter.role = req.query.role;
+    if (req.query.search) {
+      const searchRegex = new RegExp(req.query.search, 'i');
+      filter.$or = [
+        { name: searchRegex },
+        { email: searchRegex }
+      ];
+    }
+
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheParams = { page, limit, role: req.user.role };
+    if (filter.companyId) cacheParams.companyId = filter.companyId;
+    if (filter.plantId) cacheParams.plantId = filter.plantId;
+    if (filter.role) cacheParams.role = filter.role;
+    if (req.query.search) cacheParams.search = req.query.search;
+    const cacheKey = generateCacheKey('users', cacheParams);
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+
+    // Count total users for pagination metadata
+    const total = await User.countDocuments(filter);
+
+    // Get paginated users
+    const users = await User.find(filter)
+      .select("-password")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+    
+    const result = {
+      success: true,
+      data: users,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
+
+    res.json(result);
+  } catch (error) {
+    console.error("Get users error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch users" });
+  }
+};
 
 export const updateAdmin = async (req, res) => {
   try {

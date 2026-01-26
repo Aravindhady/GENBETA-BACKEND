@@ -5,6 +5,7 @@ import User from "../models/User.model.js";
 import Company from "../models/Company.model.js";
 import Plant from "../models/Plant.model.js";
 import { sendApprovalEmail, sendFormCreatedApproverNotification } from "../services/email.service.js";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 /* ======================================================
    CREATE FORM
@@ -85,11 +86,56 @@ export const getForms = async (req, res) => {
         filter.plantId = req.user.plantId;
         } else if (req.user.role === "EMPLOYEE") {
           filter.plantId = req.user.plantId;
+          // Employee can see all published forms (whether templates or regular forms)
           filter.status = { $in: ["APPROVED", "PUBLISHED"] };
-          filter.isTemplate = true;
         }
 
-    const forms = await Form.find(filter).sort({ createdAt: -1 });
+    console.log(`User role: ${req.user.role}`);
+    console.log(`User plantId: ${req.user.plantId}`);
+    console.log(`Applied filter:`, JSON.stringify(filter, null, 2));
+
+    // Handle pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Generate cache key
+    const cacheParams = { page, limit, role: req.user.role };
+    if (filter.plantId) cacheParams.plantId = filter.plantId;
+    if (filter.$and) {
+      const statusCondition = filter.$and.find(cond => cond.status);
+      const isTemplateCondition = filter.$and.find(cond => cond.$or);
+      if (statusCondition) cacheParams.status = JSON.stringify(statusCondition.status);
+      if (isTemplateCondition) cacheParams.isTemplateConditions = 'employee_specific';
+    } else if (filter.status) {
+      cacheParams.status = JSON.stringify(filter.status);
+    }
+    const cacheKey = generateCacheKey('forms', cacheParams);
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      console.log('Returning cached result');
+      return res.json(cachedResult);
+    }
+
+    // Count total forms for pagination metadata
+    const total = await Form.countDocuments(filter);
+    console.log(`Total forms matching filter: ${total}`);
+
+    // Get paginated forms
+    const forms = await Form.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    console.log(`Found ${forms.length} forms`);
+    if (forms.length > 0) {
+      console.log('Sample forms:');
+      forms.slice(0, 3).forEach(form => {
+        console.log(`  - ${form.formName} (status: ${form.status}, isTemplate: ${form.isTemplate})`);
+      });
+    }
 
     const data = await Promise.all(
       forms.map(async (form) => {
@@ -106,11 +152,26 @@ export const getForms = async (req, res) => {
         };
       })
     );
+    
+    const result = { 
+      success: true, 
+      data,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
 
-res.json({ success: true, data });
+    res.json(result);
 } catch (error) {
-console.error("Get forms error:", error);
-res.status(500).json({ success: false, message: "Failed to fetch forms" });
+    console.error("Get forms error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch forms" });
 }
 };
 
@@ -168,6 +229,50 @@ export const updateForm = async (req, res) => {
   } catch (error) {
     console.error("Update form error:", error);
     res.status(500).json({ success: false, message: error.message || "Update failed" });
+  }
+};
+
+/* ======================================================
+   ARCHIVE FORM
+====================================================== */
+export const archiveForm = async (req, res) => {
+  try {
+    const form = await Form.findByIdAndUpdate(
+      req.params.id,
+      { status: "ARCHIVED", archivedAt: new Date() },
+      { new: true }
+    );
+    
+    if (!form) {
+      return res.status(404).json({ success: false, message: "Form not found" });
+    }
+    
+    res.json({ success: true, message: "Form archived successfully", data: form });
+  } catch (error) {
+    console.error("Archive form error:", error);
+    res.status(500).json({ success: false, message: "Archive failed" });
+  }
+};
+
+/* ======================================================
+   RESTORE FORM
+====================================================== */
+export const restoreForm = async (req, res) => {
+  try {
+    const form = await Form.findByIdAndUpdate(
+      req.params.id,
+      { status: "PUBLISHED", archivedAt: null },
+      { new: true }
+    );
+    
+    if (!form) {
+      return res.status(404).json({ success: false, message: "Form not found" });
+    }
+    
+    res.json({ success: true, message: "Form restored successfully", data: form });
+  } catch (error) {
+    console.error("Restore form error:", error);
+    res.status(500).json({ success: false, message: "Restore failed" });
   }
 };
 

@@ -29,4 +29,10 @@ const companySchema = new mongoose.Schema({
     }
 }, { timestamps: true });
 
+// Add indexes for better query performance
+companySchema.index({ isActive: 1 });
+companySchema.index({ createdAt: -1 });
+companySchema.index({ name: 1 });
+companySchema.index({ subscription: 1 });
+
 export default mongoose.model("Company", companySchema);

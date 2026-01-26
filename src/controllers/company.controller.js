@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import { sendWelcomeEmail, sendPlantCreatedEmail } from "../services/email.service.js";
 
 import { uploadToCloudinary } from "../utils/cloudinary.js";
+import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 /* 🔹 Helper: Generate Plant Code */
 const generatePlantCode = () =>
@@ -191,13 +192,34 @@ export const createCompany = async (req, res) => {
 ====================================================== */
 export const getCompanies = async (req, res) => {
   try {
-    const companies = await Company.find({ isActive: true }).sort({ createdAt: -1 });
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
     
+    // Generate cache key
+    const cacheKey = generateCacheKey('companies', { page, limit });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+
+    // Count total companies for pagination metadata
+    const total = await Company.countDocuments({ isActive: true });
+
+    // Get paginated companies
+    const companies = await Company.find({ isActive: true })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    // Process companies with additional data
     const data = await Promise.all(
       companies.map(async (company) => {
         const plantsCount = await Plant.countDocuments({ companyId: company._id, isActive: true });
         const admin = await User.findOne({ companyId: company._id, role: "COMPANY_ADMIN" }).select("name email");
-        
+
         return {
           ...company.toObject(),
           id: company._id,
@@ -207,8 +229,22 @@ export const getCompanies = async (req, res) => {
         };
       })
     );
+    
+    const result = {
+      data,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1
+      }
+    };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
 
-    res.json(data);
+    res.json(result);
   } catch (error) {
     console.error("Get companies error:", error);
     res.status(500).json({ message: "Failed to fetch companies" });

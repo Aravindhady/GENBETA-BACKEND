@@ -7,8 +7,10 @@ import {
     getPlantWiseStats,
     getDashboardAnalytics,
     getApprovalsByEmployee,
-    getSuperAdminAnalytics
-    } from "../controllers/analytics.controller.js";
+    getSuperAdminAnalytics,
+    getApproversPerformance,
+    getApproversWorkload
+  } from "../controllers/analytics.controller.js";
     import { auth as authenticate, checkRole } from "../middlewares/auth.middleware.js";
     
     const router = express.Router();
@@ -25,6 +27,8 @@ import {
   router.get("/pending-by-stage", getPendingByStage);
   router.get("/plant-wise-stats", getPlantWiseStats);
   router.get("/approvals-by-employee", getApprovalsByEmployee);
+  router.get("/approvers-performance", getApproversPerformance);
+  router.get("/approvers-workload", getApproversWorkload);
   
   export default router;
 
