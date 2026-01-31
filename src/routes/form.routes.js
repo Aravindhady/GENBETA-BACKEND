@@ -6,7 +6,8 @@ import {
   updateForm,
   deleteForm,
   archiveForm,
-  restoreForm
+  restoreForm,
+  toggleTemplateStatus
 } from "../controllers/form.controller.js";
 import { sendLink } from "../controllers/approval.controller.js";
 import { auth } from "../middlewares/auth.middleware.js";
@@ -25,5 +26,8 @@ router.post("/:id/send-link", auth, authorize(["PLANT_ADMIN"]), sendLink);
 // Archive/Restore routes
 router.patch("/:id/archive", auth, authorize(["PLANT_ADMIN"]), archiveForm);
 router.patch("/:id/restore", auth, authorize(["PLANT_ADMIN"]), restoreForm);
+
+// Template status routes
+router.patch("/:id/toggle-template", auth, authorize(["PLANT_ADMIN"]), toggleTemplateStatus);
 
 export default router;

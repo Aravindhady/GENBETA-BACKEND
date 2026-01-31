@@ -243,11 +243,44 @@ export const sendPlantCreatedEmail = async (to, plantName, plantCode, companyNam
     }
 };
 
-export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "", formFields = [], submissionData = {}) => {
   let approvalContext = "";
   if (previousApprovals.length > 0) {
     const lastApproval = previousApprovals[previousApprovals.length - 1];
     approvalContext = `<p style="color: #4b5563; font-size: 14px; background-color: #eff6ff; padding: 10px; border-radius: 4px;">${lastApproval.name} has approved this form. Waiting for your approval.</p>`;
+  }
+
+  // Filter fields that should be included in approval email
+  const approvalFields = formFields.filter(field => field.includeInApprovalEmail);
+  
+  // Build approval summary table
+  let approvalSummaryHtml = '';
+  if (approvalFields.length > 0) {
+    const summaryRows = approvalFields.map(field => {
+      // The FormRenderer stores data using the field.id as the key
+      const fieldValue = submissionData[field.id] || 
+                        submissionData[field.fieldId] || 
+                        submissionData[field.label?.toLowerCase().replace(/\s+/g, '_')] || 
+                        '—';
+      
+      return `
+        <tr>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: 500; color: #374151;">${field.label}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; color: #4b5563;">${fieldValue}</td>
+        </tr>
+      `;
+    }).join('');
+    
+    approvalSummaryHtml = `
+      <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; margin: 20px 0; overflow: hidden;">
+        <div style="background-color: #f3f4f6; padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">
+          <h4 style="margin: 0; color: #1f2937; font-size: 16px;">Selected Submission Details</h4>
+        </div>
+        <table style="width: 100%; border-collapse: collapse;">
+          ${summaryRows}
+        </table>
+      </div>
+    `;
   }
 
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
@@ -258,9 +291,9 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
       <strong>${submitterName}</strong> submitted the form <strong>${formName}</strong> at ${new Date(submittedAt).toLocaleString()}.
     </p>
     ${approvalContext}
+    ${approvalSummaryHtml}
     <div style="background-color: #f3f4f6; padding: 15px; border-radius: 5px; margin: 20px 0;">
       <strong style="font-size: 18px;">${formName}</strong>
-      ${identifier ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280; font-family: monospace;">${identifier}</p>` : ''}
     </div>
     <p>Please click the button below to review and take action on this submission.</p>
     <div style="text-align: center; margin: 30px 0;">

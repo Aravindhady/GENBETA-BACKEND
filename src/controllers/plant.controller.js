@@ -163,19 +163,74 @@ export const getPlants = async (req, res) => {
 ====================================================== */
 export const updatePlant = async (req, res) => {
   try {
-    const updated = await Plant.findByIdAndUpdate(
-      req.params.id,
-      req.body,
+    const { id } = req.params;
+    const { name, location, admin } = req.body;
+    
+    // Find the plant to verify ownership
+    const plant = await Plant.findById(id);
+    if (!plant) {
+      return res.status(404).json({ message: "Plant not found" });
+    }
+    
+    // Check authorization - SUPER_ADMIN can update any plant, COMPANY_ADMIN can only update plants in their company, PLANT_ADMIN can only update their own plant
+    if (req.user.role === "COMPANY_ADMIN" && plant.companyId.toString() !== req.user.companyId.toString()) {
+      return res.status(403).json({ message: "Unauthorized to update this plant" });
+    }
+    
+    if (req.user.role === "PLANT_ADMIN" && plant._id.toString() !== req.user.plantId.toString()) {
+      return res.status(403).json({ message: "Unauthorized to update this plant" });
+    }
+    
+    // Update plant information
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (location) updateData.location = location;
+    
+    const updatedPlant = await Plant.findByIdAndUpdate(
+      id,
+      updateData,
       { new: true }
     );
+    
+    // Update plant admin information if provided
+    if (admin) {
+      const { name: adminName, email: adminEmail, password: adminPassword } = admin;
+      
+      if (adminName || adminEmail || adminPassword) {
+        const updateAdminData = {};
+        if (adminName) updateAdminData.name = adminName;
+        if (adminEmail) updateAdminData.email = adminEmail;
+        
+        // Update password only if provided
+        if (adminPassword) {
+          const hashedPassword = await bcrypt.hash(adminPassword, 10);
+          updateAdminData.password = hashedPassword;
+        }
+        
+        await User.findOneAndUpdate(
+          { plantId: id, role: "PLANT_ADMIN" },
+          updateAdminData,
+          { new: true }
+        );
+      }
+    }
+
+    // Get the updated plant with admin info
+    const updatedAdmin = await User.findOne({ plantId: id, role: "PLANT_ADMIN" }).select("name email");
+    
+    const result = {
+      ...updatedPlant.toObject(),
+      adminName: updatedAdmin?.name || "N/A",
+      adminEmail: updatedAdmin?.email || "N/A"
+    };
 
     res.json({
       message: "Plant updated successfully",
-      updated
+      plant: result
     });
   } catch (error) {
     console.error("Update plant error:", error);
-    res.status(500).json({ message: "Update failed" });
+    res.status(500).json({ message: "Update failed", error: error.message });
   }
 };
 
@@ -221,6 +276,41 @@ export const updatePlantTemplateFeature = async (req, res) => {
   } catch (error) {
     console.error("Update plant template feature error:", error);
     res.status(500).json({ success: false, message: "Failed to update template feature" });
+  }
+};
+
+export const getPlantById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Find the plant
+    const plant = await Plant.findById(id);
+    if (!plant) {
+      return res.status(404).json({ message: "Plant not found" });
+    }
+    
+    // Check authorization - SUPER_ADMIN can access any plant, COMPANY_ADMIN can only access plants in their company, PLANT_ADMIN can only access their own plant
+    if (req.user.role === "COMPANY_ADMIN" && plant.companyId.toString() !== req.user.companyId.toString()) {
+      return res.status(403).json({ message: "Unauthorized to access this plant" });
+    }
+    
+    if (req.user.role === "PLANT_ADMIN" && plant._id.toString() !== req.user.plantId.toString()) {
+      return res.status(403).json({ message: "Unauthorized to access this plant" });
+    }
+    
+    // Get the plant admin info
+    const admin = await User.findOne({ plantId: id, role: "PLANT_ADMIN" }).select("name email");
+    
+    const result = {
+      ...plant.toObject(),
+      adminName: admin?.name || "N/A",
+      adminEmail: admin?.email || "N/A"
+    };
+    
+    res.json(result);
+  } catch (error) {
+    console.error("Get plant by ID error:", error);
+    res.status(500).json({ message: "Failed to fetch plant", error: error.message });
   }
 };
 

@@ -114,8 +114,24 @@ export const updateAdmin = async (req, res) => {
 export const getPlantEmployees = async (req, res) => {
   try {
     const { plantId } = req.params;
+    
+    // Generate cache key
+    const cacheKey = generateCacheKey('plantEmployees', { plantId });
+    
+    // Try to get from cache first
+    let cachedResult = await getFromCache(cacheKey);
+    if (cachedResult) {
+      return res.json(cachedResult);
+    }
+    
     const employees = await User.find({ plantId, role: "EMPLOYEE", isActive: { $ne: false } }).select("-password");
-    res.json({ success: true, data: employees });
+    
+    const result = { success: true, data: employees };
+    
+    // Cache the result for 5 minutes
+    await setInCache(cacheKey, result, 300);
+    
+    res.json(result);
   } catch (error) {
     console.error("getPlantEmployees error:", error);
     res.status(500).json({ success: false, message: "Failed to get employees" });
@@ -159,6 +175,14 @@ export const createEmployee = async (req, res) => {
     });
 
     await newUser.save();
+
+    // Invalidate cache for plant employees
+    try {
+      const cacheKey = generateCacheKey('plantEmployees', { plantId: targetPlantId });
+      await deleteFromCache(cacheKey);
+    } catch (cacheError) {
+      console.error('Cache invalidation error:', cacheError);
+    }
 
     // Send welcome email
     try {
@@ -229,6 +253,17 @@ export const updateEmployee = async (req, res) => {
       { new: true }
     ).select("-password");
 
+    // Invalidate cache for plant employees
+    try {
+      const employee = await User.findById(employeeId);
+      if (employee && employee.plantId) {
+        const cacheKey = generateCacheKey('plantEmployees', { plantId: employee.plantId.toString() });
+        await deleteFromCache(cacheKey);
+      }
+    } catch (cacheError) {
+      console.error('Cache invalidation error:', cacheError);
+    }
+
     if (Object.keys(updatedFields).length > 0) {
       (async () => {
         try {
@@ -271,6 +306,17 @@ export const deleteEmployee = async (req, res) => {
     }
 
     await User.findByIdAndUpdate(employeeId, { isActive: false });
+
+    // Invalidate cache for plant employees
+    try {
+      const employee = await User.findById(employeeId);
+      if (employee && employee.plantId) {
+        const cacheKey = generateCacheKey('plantEmployees', { plantId: employee.plantId.toString() });
+        await deleteFromCache(cacheKey);
+      }
+    } catch (cacheError) {
+      console.error('Cache invalidation error:', cacheError);
+    }
 
     res.json({ message: "Employee deleted successfully" });
   } catch (error) {

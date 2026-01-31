@@ -45,7 +45,10 @@ const fieldSchema = new mongoose.Schema({
   placeholder: String,
   min: Number, // For number, range
   max: Number, // For number, range
-  step: Number // For number, range
+  step: Number, // For number, range
+  
+  // Approval Email Control
+  includeInApprovalEmail: { type: Boolean, default: false }
 }, { _id: false });
 
 const sectionSchema = new mongoose.Schema({

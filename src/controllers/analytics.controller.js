@@ -622,8 +622,15 @@ export const getDashboardAnalytics = async (req, res) => {
           submittedAt: { $gte: start, $lte: end }
         };
         
-        // Use the same userIds from above
-        if (userIds && userIds.length > 0) {
+        // Get users again for this query
+        let userIds = [];
+        if (filterPlantId) {
+          const users = await User.find({ plantId: filterPlantId }).select("_id").lean();
+          userIds = users.map(u => u._id);
+          query.submittedBy = { $in: userIds };
+        } else if (filterCompanyId) {
+          const users = await User.find({ companyId: filterCompanyId }).select("_id").lean();
+          userIds = users.map(u => u._id);
           query.submittedBy = { $in: userIds };
         }
 
@@ -651,8 +658,15 @@ export const getDashboardAnalytics = async (req, res) => {
           submittedAt: { $gte: start, $lte: end }
         };
         
-        // Use the same userIds from above
-        if (userIds && userIds.length > 0) {
+        // Get users again for this query
+        let userIds = [];
+        if (filterPlantId) {
+          const users = await User.find({ plantId: filterPlantId }).select("_id").lean();
+          userIds = users.map(u => u._id);
+          query.submittedBy = { $in: userIds };
+        } else if (filterCompanyId) {
+          const users = await User.find({ companyId: filterCompanyId }).select("_id").lean();
+          userIds = users.map(u => u._id);
           query.submittedBy = { $in: userIds };
         }
 
@@ -674,8 +688,15 @@ export const getDashboardAnalytics = async (req, res) => {
       // Pending by stage
       (async () => {
         let query = {};
-        // Use the same userIds from above
-        if (userIds && userIds.length > 0) {
+        // Get users again for this query
+        let userIds = [];
+        if (filterPlantId) {
+          const users = await User.find({ plantId: filterPlantId }).select("_id").lean();
+          userIds = users.map(u => u._id);
+          query.submittedBy = { $in: userIds };
+        } else if (filterCompanyId) {
+          const users = await User.find({ companyId: filterCompanyId }).select("_id").lean();
+          userIds = users.map(u => u._id);
           query.submittedBy = { $in: userIds };
         }
 

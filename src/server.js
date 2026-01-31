@@ -12,6 +12,7 @@ import plantRoutes from "./routes/plant.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import formRoutes from "./routes/form.routes.js";
 import submissionRoutes from "./routes/submission.routes.js";
+import formTaskRoutes from "./routes/formTask.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import analyticsRoutes from "./routes/analytics.routes.js";
 import approvalRoutes from "./routes/approval.routes.js";
@@ -55,6 +56,7 @@ app.use("/api/company", companyRoutes); // Add singular alias
 app.use("/api/plants", plantRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/forms", formRoutes);
+app.use("/api/form-task", formTaskRoutes);
 app.use("/api/submissions", submissionRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/analytics", analyticsRoutes);

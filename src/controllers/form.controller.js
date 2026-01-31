@@ -1,4 +1,5 @@
 import Form from "../models/Form.model.js";
+import FormTemplate from "../models/FormTemplate.model.js";
 import FormSubmission from "../models/FormSubmission.model.js";
 import Assignment from "../models/Assignment.model.js";
 import User from "../models/User.model.js";
@@ -179,16 +180,24 @@ export const getForms = async (req, res) => {
 GET SINGLE FORM
 ====================================================== */
 export const getFormById = async (req, res) => {
-try {
-const form = await Form.findById(req.params.id).populate("approvalFlow.approverId", "name email");
-if (!form) {
-return res.status(404).json({ success: false, message: "Form not found" });
-}
-res.json({ success: true, data: form });
-} catch (error) {
-console.error("Get form by id error:", error);
-res.status(500).json({ success: false, message: "Failed to fetch form" });
-}
+  try {
+    // First, try to find in Form model
+    let form = await Form.findById(req.params.id).populate("approvalFlow.approverId", "name email");
+    
+    if (!form) {
+      // If not found in Form model, try FormTemplate model
+      form = await FormTemplate.findById(req.params.id).populate("workflow.approverId", "name email");
+    }
+    
+    if (!form) {
+      return res.status(404).json({ success: false, message: "Form not found" });
+    }
+    
+    res.json({ success: true, data: form });
+  } catch (error) {
+    console.error("Get form by id error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch form" });
+  }
 };
 
 /* ======================================================
@@ -273,6 +282,40 @@ export const restoreForm = async (req, res) => {
   } catch (error) {
     console.error("Restore form error:", error);
     res.status(500).json({ success: false, message: "Restore failed" });
+  }
+};
+
+/* ======================================================
+   TOGGLE TEMPLATE STATUS
+====================================================== */
+export const toggleTemplateStatus = async (req, res) => {
+  try {
+    const { isTemplate } = req.body;
+    
+    const form = await Form.findById(req.params.id);
+    if (!form) {
+      return res.status(404).json({ success: false, message: "Form not found" });
+    }
+    
+    // Only allow toggling if the form belongs to the same plant
+    if (form.plantId.toString() !== req.user.plantId.toString()) {
+      return res.status(403).json({ success: false, message: "Not authorized to update this form" });
+    }
+    
+    const updated = await Form.findByIdAndUpdate(
+      req.params.id,
+      { isTemplate },
+      { new: true }
+    );
+    
+    res.json({
+      success: true,
+      message: `Form ${isTemplate ? 'saved as' : 'removed from'} template successfully`,
+      updated
+    });
+  } catch (error) {
+    console.error("Toggle template status error:", error);
+    res.status(500).json({ success: false, message: "Toggle template status failed" });
   }
 };
 

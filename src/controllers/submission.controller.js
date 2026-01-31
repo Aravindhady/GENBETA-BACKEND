@@ -1,15 +1,11 @@
-import FormTemplate from "../models/FormTemplate.model.js";
 import Form from "../models/Form.model.js";
 import FormSubmission from "../models/FormSubmission.model.js";
-import Assignment from "../models/Assignment.model.js";
 import User from "../models/User.model.js";
 import Company from "../models/Company.model.js";
 import Plant from "../models/Plant.model.js";
 import mongoose from "mongoose";
-import { sendSubmissionNotificationToApprover, sendSubmissionNotificationToPlant } from "../services/email.service.js";
 import { uploadToCloudinary } from "../utils/cloudinary.js";
 import fs from "fs";
-import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 
 /* ======================================================
    CREATE SUBMISSION
@@ -17,16 +13,29 @@ import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
 export const createSubmission = async (req, res) => {
   try {
     const { 
-      templateId, 
-      assignmentId,
-      plantId, 
-      companyId, 
+      formId, 
       data, 
-      submittedBy, 
-      status: requestedStatus 
+      status = "DRAFT"
     } = req.body;
     
-    // Process files if any - upload to Cloudinary
+    const userId = req.user.userId;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    const form = await Form.findById(formId);
+    if (!form) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Form not found" 
+      });
+    }
+
+    // Process files if any
     const files = [];
     let parsedData = typeof data === 'string' ? JSON.parse(data) : data;
     
@@ -38,459 +47,386 @@ export const createSubmission = async (req, res) => {
             fieldId: file.fieldname,
             filename: file.filename,
             originalName: file.originalname,
-            path: result.secure_url,
-            cloudinaryPublicId: result.public_id,
+            url: result.secure_url,
             mimetype: file.mimetype,
             size: file.size
           });
           parsedData[file.fieldname] = result.secure_url;
-          fs.unlink(file.path, () => {});
+          fs.unlinkSync(file.path);
         } catch (uploadError) {
-          console.error("Cloudinary upload error for file:", file.originalname, uploadError);
-          files.push({
-            fieldId: file.fieldname,
-            filename: file.filename,
-            originalName: file.originalname,
-            path: file.path,
-            mimetype: file.mimetype,
-            size: file.size
-          });
+          console.error("File upload error:", file.originalname, uploadError);
+          fs.unlinkSync(file.path);
         }
       }
     }
 
-    // Find the template to check for approval flow
-    let template = await FormTemplate.findById(templateId);
-    let modelType = "FormTemplate";
+    // Determine initial status
+    const hasApprovalFlow = form.approvalFlow && form.approvalFlow.length > 0;
+    const initialStatus = status === "SUBMITTED" && hasApprovalFlow 
+      ? "PENDING_APPROVAL" 
+      : status;
 
-    if (!template) {
-      template = await Form.findById(templateId);
-      modelType = "Form";
-    }
-
-    if (!template) {
-      return res.status(404).json({ success: false, message: "Template not found" });
-    }
-
-    // Check workflow/approvalFlow
-    const workflow = template.workflow || template.approvalFlow || [];
-    const hasFlow = workflow.length > 0;
-    
-    // Determine status: DRAFT from frontend or based on flow
-    let finalStatus = requestedStatus || "PENDING_APPROVAL";
-    if (finalStatus !== "DRAFT") {
-      finalStatus = hasFlow ? "PENDING_APPROVAL" : "APPROVED";
-    }
-
-    // Get form's numerical ID if it's a Form template
-    let formNumericalId = null;
-    if (modelType === 'Form' && template.numericalId) {
-      formNumericalId = template.numericalId;
-    }
-
-    // Get user details for submission
-    const userId = submittedBy || req.user?.userId;
-    const user = await User.findById(userId);
-    
-    const newSubmission = await FormSubmission.create({
-      templateId: template._id,
-      templateModel: modelType,
-      templateName: template.templateName || template.formName,
-      formNumericalId: formNumericalId,
-      assignmentId: assignmentId || null,
-      plantId: plantId || template.plantId || req.user?.plantId,
-      companyId: companyId || template.companyId || req.user?.companyId,
-      data: parsedData,
+    const submissionData = {
+      formId: form._id,
+      formName: form.formName,
       submittedBy: userId,
-      submittedByName: user?.name || "Unknown User",
-      submittedByEmail: user?.email || "unknown@example.com",
-      files,
-      status: finalStatus,
-      currentLevel: finalStatus === "PENDING_APPROVAL" ? 1 : 0
+      submittedByName: user.name,
+      submittedByEmail: user.email,
+      data: parsedData,
+      files: files,
+      status: initialStatus,
+      companyId: user.companyId,
+      plantId: user.plantId,
+      currentLevel: initialStatus === "PENDING_APPROVAL" ? 1 : 0
+    };
+
+    const submission = await FormSubmission.create(submissionData);
+
+    res.status(201).json({
+      success: true,
+      message: "Submission created successfully",
+      data: submission
     });
-
-    // If linked to an assignment, update assignment status
-      if (assignmentId && mongoose.isValidObjectId(assignmentId)) {
-        await Assignment.findByIdAndUpdate(assignmentId, {
-          status: "FILLED",
-          submissionId: newSubmission._id,
-          submittedAt: new Date()
-        });
-      }
-
-      res.status(201).json({
-        success: true,
-        message: finalStatus === "DRAFT" ? "Draft saved successfully" : "Submission created successfully",
-        submission: newSubmission
-      });
-
-      // Notification logic (non-blocking)
-      if (finalStatus === "PENDING_APPROVAL" && hasFlow) {
-        (async () => {
-          try {
-            const firstLevel = workflow.find(w => w.level === 1);
-            if (firstLevel) {
-              const approverId = firstLevel.approverId?._id || firstLevel.approverId;
-              const approver = await User.findById(approverId);
-              const submitter = await User.findById(newSubmission.submittedBy);
-              
-              // Fetch company and plant details
-              const company = await Company.findById(newSubmission.companyId);
-              const plant = await Plant.findById(newSubmission.plantId);
-              
-              if (approver && approver.email) {
-                const approvalLink = `${process.env.FRONTEND_URL}/employee/approvals/${newSubmission._id}`;
-                // Get form with numerical ID
-                let form = null;
-                if (modelType === 'Form') {
-                  form = template;
-                } else {
-                  form = await Form.findById(template._id).catch(() => null);
-                }
-                const plantId = plant?.plantNumber || plant?._id?.toString() || newSubmission.plantId?.toString() || "";
-                const formId = (form?.numericalId || newSubmission.formNumericalId)?.toString() || form?.formId || form?._id?.toString() || "";
-                const submissionId = newSubmission.numericalId?.toString() || newSubmission._id?.toString() || "";
-                
-                await sendSubmissionNotificationToApprover(
-                  approver.email,
-                  newSubmission.templateName,
-                  submitter?.name || "An employee",
-                  newSubmission.createdAt,
-                  approvalLink,
-                  [],
-                  company,
-                  plant,
-                  plantId,
-                  formId,
-                  submissionId
-                );
-              }
-            }
-          } catch (emailErr) {
-            console.error("Failed to send initial submission notification:", emailErr);
-          }
-        })();
-    }
-
-    // Send notification to plant admin (non-blocking)
-    (async () => {
-      try {
-        const plant = await Plant.findById(newSubmission.plantId).populate("adminId");
-        const company = await Company.findById(newSubmission.companyId);
-        const submitter = await User.findById(newSubmission.submittedBy);
-        
-        if (plant?.adminId?.email) {
-          const viewLink = `${process.env.FRONTEND_URL}/plant/submissions/${newSubmission._id}`;
-          let form = null;
-          if (newSubmission.templateModel === 'Form') {
-            form = await Form.findById(newSubmission.templateId).catch(() => null);
-          } else {
-            form = await Form.findById(newSubmission.templateId).catch(() => null);
-          }
-          const plantId = plant?.plantNumber || plant?._id?.toString() || newSubmission.plantId?.toString() || "";
-          const formId = (form?.numericalId || newSubmission.formNumericalId)?.toString() || form?.formId || form?._id?.toString() || "";
-          const submissionId = newSubmission.numericalId?.toString() || newSubmission._id?.toString() || "";
-          
-          await sendSubmissionNotificationToPlant(
-            plant.adminId.email,
-            newSubmission.templateName,
-            submitter?.name || "An employee",
-            newSubmission.createdAt,
-            viewLink,
-            company,
-            plant,
-            plantId,
-            formId,
-            submissionId
-          );
-        }
-      } catch (emailErr) {
-        console.error("Failed to send plant admin notification:", emailErr);
-      }
-    })();
 
   } catch (error) {
     console.error("Create submission error:", error);
-    res.status(500).json({ success: false, message: "Failed to create submission" });
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to create submission",
+      error: error.message 
+    });
   }
 };
 
 /* ======================================================
-   GET SUBMISSIONS (LIST) - Enhanced with filters
+   GET ALL SUBMISSIONS
 ====================================================== */
 export const getSubmissions = async (req, res) => {
   try {
-    const filter = {};
+    const { 
+      formId, 
+      status, 
+      page = 1, 
+      limit = 20,
+      sortBy = 'submittedAt',
+      sortOrder = 'desc'
+    } = req.query;
 
+    const filter = { isArchived: false };
+    
+    // Role-based filtering
     if (req.user.role === "PLANT_ADMIN") {
       filter.plantId = req.user.plantId;
     } else if (req.user.role === "COMPANY_ADMIN") {
       filter.companyId = req.user.companyId;
-    } else if (req.user.role === "SUPER_ADMIN") {
-      if (req.query.plantId) filter.plantId = req.query.plantId;
-      if (req.query.companyId) filter.companyId = req.query.companyId;
     } else if (req.user.role === "EMPLOYEE") {
       filter.submittedBy = req.user.userId;
     }
 
-    if (req.query.templateId) filter.templateId = req.query.templateId;
-    if (req.query.status) filter.status = req.query.status;
-    
-    if (req.query.startDate || req.query.endDate) {
-      filter.submittedAt = {};
-      if (req.query.startDate) filter.submittedAt.$gte = new Date(req.query.startDate);
-      if (req.query.endDate) filter.submittedAt.$lte = new Date(req.query.endDate);
-    }
+    if (formId) filter.formId = formId;
+    if (status) filter.status = status;
 
-    if (req.query.submittedBy) {
-      filter.submittedBy = req.query.submittedBy;
-    }
-
-    // Handle pagination
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
-    
-    // Generate cache key
-    const cacheParams = { page, limit, role: req.user.role };
-    if (filter.plantId) cacheParams.plantId = filter.plantId;
-    if (filter.companyId) cacheParams.companyId = filter.companyId;
-    if (filter.templateId) cacheParams.templateId = filter.templateId;
-    if (filter.status) cacheParams.status = filter.status;
-    if (filter.submittedBy) cacheParams.submittedBy = filter.submittedBy;
-    if (req.query.startDate) cacheParams.startDate = req.query.startDate;
-    if (req.query.endDate) cacheParams.endDate = req.query.endDate;
-    const cacheKey = generateCacheKey('submissions', cacheParams);
-    
-    // Try to get from cache first
-    let cachedResult = await getFromCache(cacheKey);
-    if (cachedResult) {
-      return res.json(cachedResult);
-    }
-
-    // Count total submissions for pagination metadata
-    const total = await FormSubmission.countDocuments(filter);
+    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
 
     const submissions = await FormSubmission.find(filter)
-      .populate("templateId", "templateName formName formId numericalId workflow approvalFlow")
-      .populate("approvalHistory.approverId", "name email")
-      .populate("plantId", "name")
-      .populate({
-        path: "submittedBy",
-        model: "User",
-        select: "name email",
-        strictPopulate: false
-      })
-      .sort({ createdAt: -1 })
+      .populate("submittedBy", "name email")
+      .populate("approvedBy", "name email")
+      .populate("rejectedBy", "name email")
+      .sort(sort)
       .skip(skip)
-      .limit(limit);
+      .limit(parseInt(limit));
 
-    const enrichedSubmissions = submissions.map(sub => {
-      const subObj = sub.toObject();
-      const lastApproval = subObj.approvalHistory && subObj.approvalHistory.length > 0
-        ? subObj.approvalHistory[subObj.approvalHistory.length - 1]
-        : null;
-      
-        return {
-          ...subObj,
-          templateName: subObj.templateName || subObj.templateId?.templateName || "Unknown Form",
-          plantName: subObj.plantId?.name || "N/A",
-          lastApprovedBy: lastApproval?.approverId?.name || null,
-          lastActionAt: lastApproval?.actionedAt || null
-        };
-    });
-    
-    const result = { 
-      success: true, 
-      data: enrichedSubmissions,
+    const total = await FormSubmission.countDocuments(filter);
+
+    res.json({
+      success: true,
+      data: submissions,
       pagination: {
-        currentPage: page,
+        currentPage: parseInt(page),
         totalPages: Math.ceil(total / limit),
-        total,
-        hasNext: page < Math.ceil(total / limit),
+        totalItems: total,
+        hasNext: page * limit < total,
         hasPrev: page > 1
       }
-    };
-    
-    // Cache the result for 5 minutes
-    await setInCache(cacheKey, result, 300);
+    });
 
-    res.json(result);
   } catch (error) {
     console.error("Get submissions error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch submissions" });
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch submissions" 
+    });
   }
 };
 
 /* ======================================================
-   GET SINGLE SUBMISSION
+   GET SUBMISSION BY ID
 ====================================================== */
 export const getSubmissionById = async (req, res) => {
   try {
-    const submission = await FormSubmission.findById(req.params.id)
-      .populate("templateId", "templateName formName formId numericalId workflow approvalFlow")
-      .populate("plantId", "name location")
+    const { id } = req.params;
+    
+    const submission = await FormSubmission.findById(id)
+      .populate({
+        path: "formId",
+        select: "formName approvalFlow fields sections",
+        populate: {
+          path: "approvalFlow.approverId",
+          select: "name email"
+        }
+      })
+      .populate("submittedBy", "name email")
+      .populate("approvedBy", "name email")
+      .populate("rejectedBy", "name email")
       .populate("companyId", "name")
-      .populate("submittedBy", "name email");
+      .populate("plantId", "name");
 
     if (!submission) {
-      return res.status(404).json({ success: false, message: "Submission not found" });
-    }
-
-    const enrichedData = { ...submission.data };
-    if (submission.files && submission.files.length > 0) {
-      submission.files.forEach(file => {
-        if (file.fieldId && file.path) {
-          if (file.path.startsWith('http://') || file.path.startsWith('https://')) {
-            enrichedData[file.fieldId] = file.path;
-          } else {
-            const baseUrl = process.env.SERVER_URL || `http://localhost:${process.env.PORT || 5001}`;
-            const normalizedPath = file.path.replace(/\\/g, '/').replace(/^uploads\//, '');
-            enrichedData[file.fieldId] = `${baseUrl}/uploads/${normalizedPath}`;
-          }
-        }
+      return res.status(404).json({ 
+        success: false, 
+        message: "Submission not found" 
       });
     }
 
-    const result = submission.toObject();
-    result.data = enrichedData;
+    // Authorization check
+    if (req.user.role === "EMPLOYEE" && submission.submittedBy._id.toString() !== req.user.userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Access denied" 
+      });
+    }
 
-    res.json({ success: true, data: result });
+    res.json({
+      success: true,
+      data: submission
+    });
+
   } catch (error) {
     console.error("Get submission error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch submission" });
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch submission" 
+    });
   }
 };
 
 /* ======================================================
-   UPDATE STATUS
+   UPDATE SUBMISSION
 ====================================================== */
-export const updateStatus = async (req, res) => {
+export const updateSubmission = async (req, res) => {
   try {
-    const { status, comments } = req.body;
-    const updateData = { status: status.toUpperCase() };
+    const { id } = req.params;
+    const { data, status } = req.body;
 
-    if (updateData.status === "APPROVED") {
-      updateData.approvedAt = new Date();
-      updateData.approvedBy = req.user.userId;
-    } else if (updateData.status === "REJECTED") {
-      updateData.rejectedAt = new Date();
-      updateData.rejectedBy = req.user.userId;
-    }
-
-    // Add to approval history
-    const submission = await FormSubmission.findById(req.params.id);
+    const submission = await FormSubmission.findById(id);
     if (!submission) {
-       return res.status(404).json({ success: false, message: "Submission not found" });
+      return res.status(404).json({ 
+        success: false, 
+        message: "Submission not found" 
+      });
     }
 
-    submission.approvalHistory.push({
-        level: submission.currentLevel,
-        approverId: req.user.userId,
-        status: updateData.status,
-        comments: comments || "",
-        actionedAt: new Date()
-    });
+    // Authorization check
+    if (req.user.role === "EMPLOYEE" && submission.submittedBy.toString() !== req.user.userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Access denied" 
+      });
+    }
 
-    submission.status = updateData.status;
-    if (updateData.status === "APPROVED") {
-        submission.approvedAt = updateData.approvedAt;
-        submission.approvedBy = updateData.approvedBy;
-    } else if (updateData.status === "REJECTED") {
-        submission.rejectedAt = updateData.rejectedAt;
-        submission.rejectedBy = updateData.rejectedBy;
+    // Only allow updating DRAFT submissions
+    if (submission.status !== "DRAFT") {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Only draft submissions can be updated" 
+      });
+    }
+
+    if (data) {
+      submission.data = typeof data === 'string' ? JSON.parse(data) : data;
+    }
+
+    if (status) {
+      submission.status = status;
     }
 
     const updated = await submission.save();
 
-    res.json({ success: true, message: "Status updated successfully", updated });
+    res.json({
+      success: true,
+      message: "Submission updated successfully",
+      data: updated
+    });
+
   } catch (error) {
-    console.error("Update status error:", error);
-    res.status(500).json({ success: false, message: "Failed to update status" });
+    console.error("Update submission error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to update submission" 
+    });
   }
 };
 
 /* ======================================================
-   GET TEMPLATE ANALYTICS
+   DELETE SUBMISSION
 ====================================================== */
-export const getTemplateAnalytics = async (req, res) => {
+export const deleteSubmission = async (req, res) => {
   try {
-    const { templateId } = req.params;
-    
-    const filter = { templateId: templateId };
+    const { id } = req.params;
+
+    const submission = await FormSubmission.findById(id);
+    if (!submission) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Submission not found" 
+      });
+    }
+
+    // Authorization check
+    if (req.user.role === "EMPLOYEE" && submission.submittedBy.toString() !== req.user.userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Access denied" 
+      });
+    }
+
+    // Only allow deleting DRAFT submissions
+    if (submission.status !== "DRAFT") {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Only draft submissions can be deleted" 
+      });
+    }
+
+    await FormSubmission.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: "Submission deleted successfully"
+    });
+
+  } catch (error) {
+    console.error("Delete submission error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to delete submission" 
+    });
+  }
+};
+
+/* ======================================================
+   SUBMIT DRAFT SUBMISSION
+====================================================== */
+export const submitDraft = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const submission = await FormSubmission.findById(id).populate("formId");
+    if (!submission) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Submission not found" 
+      });
+    }
+
+    // Authorization check
+    if (req.user.role === "EMPLOYEE" && submission.submittedBy.toString() !== req.user.userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Access denied" 
+      });
+    }
+
+    if (submission.status !== "DRAFT") {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Only draft submissions can be submitted" 
+      });
+    }
+
+    const form = submission.formId;
+    const hasApprovalFlow = form?.approvalFlow && form.approvalFlow.length > 0;
+    const newStatus = hasApprovalFlow ? "PENDING_APPROVAL" : "APPROVED";
+
+    submission.status = newStatus;
+    submission.submittedAt = new Date();
+    submission.currentLevel = newStatus === "PENDING_APPROVAL" ? 1 : 0;
+
+    if (newStatus === "APPROVED") {
+      submission.approvedAt = new Date();
+      submission.approvedBy = req.user.userId;
+    }
+
+    const updated = await submission.save();
+
+    res.json({
+      success: true,
+      message: "Submission submitted successfully",
+      data: updated
+    });
+
+  } catch (error) {
+    console.error("Submit draft error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to submit submission" 
+    });
+  }
+};
+
+/* ======================================================
+   GET SUBMISSION STATS
+====================================================== */
+export const getSubmissionStats = async (req, res) => {
+  try {
+    const filter = { isArchived: false };
     
     if (req.user.role === "PLANT_ADMIN") {
       filter.plantId = req.user.plantId;
     } else if (req.user.role === "COMPANY_ADMIN") {
       filter.companyId = req.user.companyId;
+    } else if (req.user.role === "EMPLOYEE") {
+      filter.submittedBy = req.user.userId;
     }
 
-    const submissions = await FormSubmission.find(filter)
-      .populate("templateId", "workflow approvalFlow")
-      .lean();
+    const stats = await FormSubmission.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 
-    const total = submissions.length;
-    const approved = submissions.filter(s => s.status === "APPROVED").length;
-    const pending = submissions.filter(s => ["PENDING_APPROVAL", "IN_PROGRESS"].includes(s.status)).length;
-    const rejected = submissions.filter(s => s.status === "REJECTED").length;
-
-    let template = await FormTemplate.findById(templateId).select("workflow templateName").lean();
-    if (!template) {
-      template = await Form.findById(templateId).select("approvalFlow formName").lean();
-    }
-    
-    const workflow = template?.workflow || template?.approvalFlow || [];
-    const totalLevels = workflow.length || 0;
-
-    const levelStats = [];
-    for (let level = 1; level <= totalLevels; level++) {
-      const approvedAtLevel = submissions.filter(sub => {
-        if (!sub.approvalHistory) return false;
-        return sub.approvalHistory.some(h => h.level === level && h.status === "APPROVED");
-      }).length;
-      
-      levelStats.push({
-        level,
-        approved: approvedAtLevel,
-        total
-      });
-    }
-
-    const approvedSubmissions = submissions.filter(s => s.status === "APPROVED" && s.approvedAt && s.submittedAt);
-    let avgApprovalTimeMs = 0;
-    if (approvedSubmissions.length > 0) {
-      const totalTime = approvedSubmissions.reduce((acc, sub) => {
-        return acc + (new Date(sub.approvedAt) - new Date(sub.submittedAt));
-      }, 0);
-      avgApprovalTimeMs = totalTime / approvedSubmissions.length;
-    }
-
-    const formatTime = (ms) => {
-      if (ms === 0) return "N/A";
-      const hours = Math.floor(ms / (1000 * 60 * 60));
-      if (hours < 24) return `${hours}h`;
-      const days = Math.floor(hours / 24);
-      const remainingHours = hours % 24;
-      return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+    const formattedStats = {
+      draft: 0,
+      submitted: 0,
+      pending_approval: 0,
+      approved: 0,
+      rejected: 0
     };
 
-    const completionRate = total > 0 ? Math.round((approved / total) * 100) : 0;
+    stats.forEach(stat => {
+      formattedStats[stat._id.toLowerCase()] = stat.count;
+    });
+
+    const total = Object.values(formattedStats).reduce((sum, count) => sum + count, 0);
 
     res.json({
       success: true,
       data: {
-        templateName: template?.templateName || "Unknown",
-        total,
-        approved,
-        pending,
-        rejected,
-        levelStats,
-        avgApprovalTime: formatTime(avgApprovalTimeMs),
-        completionRate
+        ...formattedStats,
+        total
       }
     });
+
   } catch (error) {
-    console.error("Get template analytics error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch template analytics" });
+    console.error("Get stats error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch statistics" 
+    });
   }
 };

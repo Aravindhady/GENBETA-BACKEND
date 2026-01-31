@@ -2,6 +2,7 @@ import ApprovalLink from "../models/ApprovalLink.model.js";
 import ApprovalTask from "../models/ApprovalTask.model.js";
 import Form from "../models/Form.model.js";
 import FormSubmission from "../models/FormSubmission.model.js";
+import FormTask from "../models/FormTask.model.js";
 import User from "../models/User.model.js";
 import Company from "../models/Company.model.js";
 import Plant from "../models/Plant.model.js";
@@ -287,14 +288,15 @@ export const getAssignedSubmissions = async (req, res) => {
       return res.json(cachedResult);
     }
 
-    // Optimized approach: Get all forms where user is an approver or plant forms with no approval flow
-    const formsWithUserAsApprover = await Form.find({
-      "approvalFlow.approverId": userId
-    }).select("_id").lean();
+    // Get submissions where user is assigned as an approver through FormTask
+    const assignedTasks = await FormTask.find({
+      assignedTo: userId,
+      status: "pending"
+    }).populate("formId").lean();
     
-    const formIds = formsWithUserAsApprover.map(f => f._id);
+    const formIds = assignedTasks.map(task => task.formId._id);
     
-    // Get forms from user's plant that have no approval flow
+    // Also get forms from user's plant that have no approval flow (direct submissions)
     const formsWithoutFlow = await Form.find({
       plantId,
       $or: [
@@ -311,20 +313,20 @@ export const getAssignedSubmissions = async (req, res) => {
       return res.json(result);
     }
 
-    // Find submissions for these forms that are currently in progress
+    // Find submissions for these forms that are currently pending approval
     const submissions = await FormSubmission.find({
-      templateId: { $in: allFormIds },
-      status: { $in: ["PENDING_APPROVAL", "IN_PROGRESS", "in_progress", "SUBMITTED"] }
+      formId: { $in: allFormIds },
+      status: { $in: ["PENDING_APPROVAL", "SUBMITTED"] }
     })
-    .populate("templateId", "formName approvalFlow")
+    .populate("formId", "formName approvalFlow")
     .populate("submittedBy", "name email")
-    .sort({ createdAt: -1 })
+    .sort({ submittedAt: -1 })
     .lean();
 
-    // Enhance submissions with "isMyTurn" and "pendingApprover" info
+    // Enhance submissions with task information and "isMyTurn" logic
     const enhancedSubmissions = submissions.map(sub => {
-      const template = sub.templateId;
-      const flow = template?.approvalFlow || [];
+      const form = sub.formId;
+      const flow = form?.approvalFlow || [];
       
       // If no approval flow, it's always the user's turn
       if (flow.length === 0) {
@@ -332,7 +334,8 @@ export const getAssignedSubmissions = async (req, res) => {
           ...sub,
           isMyTurn: true,
           userLevel: 1,
-          pendingApproverName: null
+          pendingApproverName: null,
+          assignedTask: assignedTasks.find(task => task.formId._id.toString() === sub.formId._id.toString())
         };
       }
       
@@ -343,7 +346,7 @@ export const getAssignedSubmissions = async (req, res) => {
       );
       const userLevel = userLevelEntry?.level;
       
-      // Determine if it's the user's turn
+      // For sequential approval, check if it's the user's turn based on currentLevel
       const isMyTurn = sub.currentLevel === userLevel;
       
       // Get the name of the person who needs to approve before this user
@@ -357,7 +360,8 @@ export const getAssignedSubmissions = async (req, res) => {
         ...sub,
         isMyTurn,
         userLevel,
-        pendingApproverName
+        pendingApproverName,
+        assignedTask: assignedTasks.find(task => task.formId._id.toString() === sub.formId._id.toString())
       };
     });
     
@@ -378,7 +382,7 @@ export const processApproval = async (req, res) => {
     const userId = req.user.userId;
 
     const submission = await FormSubmission.findById(submissionId).populate({
-      path: "templateId",
+      path: "formId",
       populate: {
         path: "approvalFlow.approverId",
         select: "name email"
@@ -386,7 +390,7 @@ export const processApproval = async (req, res) => {
     });
     if (!submission) return res.status(404).json({ message: "Submission not found" });
 
-    const form = submission.templateId;
+    const form = submission.formId;
     const flow = form?.approvalFlow || [];
     
     // For forms with no approval flow, allow any authorized user to approve
@@ -408,7 +412,8 @@ export const processApproval = async (req, res) => {
 
     // If data is provided (approver edited the form), update it
     if (data) {
-      submission.data = data;
+      // Merge new data with existing data to preserve fields not modified by approver
+      submission.data = { ...submission.data, ...data };
       submission.markModified('data');
     }
 

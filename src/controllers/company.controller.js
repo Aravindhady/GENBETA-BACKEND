@@ -14,10 +14,11 @@ const generatePlantCode = () =>
 /* ======================================================
    CREATE COMPANY + INITIAL PLANTS + ADMIN
 ====================================================== */
-    export const createCompanyWithPlantsAdmin = async (req, res) => {
-      try {
-        const { company, plants, admin, plan, customLimits } = req.body;
-
+export const createCompanyWithPlantsAdmin = async (req, res) => {
+  try {
+    const { company, plants, admin, plan, customLimits } = req.body;
+    
+    console.log("Received request body:", JSON.stringify(req.body, null, 2));
 
     if (!company || !plants || !admin) {
       return res.status(400).json({ message: "Missing required data (company, plants, or admin)" });
@@ -70,6 +71,7 @@ const generatePlantCode = () =>
 
         // Create Plant Admin if details are provided
         if (p.adminEmail && p.adminPassword && p.adminName) {
+          console.log("Creating plant admin for plant:", p.name, "with email:", p.adminEmail);
           const plantHashedPassword = await bcrypt.hash(p.adminPassword, 10);
           await User.create({
             companyId: newCompany._id,
@@ -80,6 +82,8 @@ const generatePlantCode = () =>
             role: "PLANT_ADMIN",
           });
           
+          console.log("Plant admin created successfully for:", p.adminEmail);
+          
           const loginUrl = process.env.CLIENT_URL || "http://localhost:5173/login";
           sendWelcomeEmail(
             p.adminEmail,
@@ -89,6 +93,12 @@ const generatePlantCode = () =>
             loginUrl,
             p.adminPassword
           ).catch(err => console.error("Failed to send plant admin welcome email:", err));
+        } else {
+          console.log("Skipping plant admin creation - missing data:", {
+            adminName: p.adminName,
+            adminEmail: p.adminEmail,
+            adminPassword: p.adminPassword ? "[PROVIDED]" : "[MISSING]"
+          });
         }
 
         return plant;
@@ -310,31 +320,80 @@ export const getCompanyById = async (req, res) => {
 ====================================================== */
 export const updateCompany = async (req, res) => {
   try {
-    const updateData = { ...req.body };
+    // Handle the case where admin data might be sent as a JSON string in FormData
+    let parsedBody = req.body;
+    if (typeof req.body.admin === 'string') {
+      try {
+        parsedBody = { ...req.body };
+        parsedBody.admin = JSON.parse(req.body.admin);
+      } catch (parseError) {
+        console.error('Failed to parse admin data:', parseError);
+      }
+    }
+    
+    const { name, industry, contactEmail, contactPhone, gstNumber, address, admin } = parsedBody;
     
     // Handle logo if uploaded via multer (now using Cloudinary)
+    let logoUrl;
     if (req.file) {
       const result = await uploadToCloudinary(req.file.buffer);
-      updateData.logoUrl = result.secure_url;
+      logoUrl = result.secure_url;
     }
 
-    const updated = await Company.findByIdAndUpdate(
+    // Update company information
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (industry) updateData.industry = industry;
+    if (contactEmail) updateData.contactEmail = contactEmail;
+    if (contactPhone) updateData.contactPhone = contactPhone;
+    if (gstNumber) updateData.gstNumber = gstNumber;
+    if (address) updateData.address = address;
+    if (logoUrl) updateData.logoUrl = logoUrl;
+
+    const updatedCompany = await Company.findByIdAndUpdate(
       req.params.id,
       updateData,
       { new: true }
     );
 
-    if (!updated) {
+    if (!updatedCompany) {
       return res.status(404).json({ message: "Company not found" });
+    }
+
+    // Update admin information if provided
+    if (admin) {
+      const { name: adminName, email: adminEmail, password: adminPassword } = admin;
+      
+      if (adminName || adminEmail || adminPassword) {
+        const updateAdminData = {};
+        if (adminName) updateAdminData.name = adminName;
+        if (adminEmail) updateAdminData.email = adminEmail;
+        
+        if (adminPassword) {
+          const hashedPassword = await bcrypt.hash(adminPassword, 10);
+          updateAdminData.password = hashedPassword;
+        }
+        
+        // Find and update the company admin
+        const updatedAdmin = await User.findOneAndUpdate(
+          { companyId: req.params.id, role: "COMPANY_ADMIN" },
+          updateAdminData,
+          { new: true }
+        );
+        
+        if (!updatedAdmin) {
+          console.warn(`Company admin not found for company ID: ${req.params.id}`);
+        }
+      }
     }
 
     res.json({
       message: "Company updated successfully",
-      updated
+      updated: updatedCompany
     });
   } catch (error) {
     console.error("Update company error:", error);
-    res.status(500).json({ message: "Update failed" });
+    res.status(500).json({ message: "Update failed", error: error.message });
   }
 };
 

@@ -72,4 +72,63 @@ export const login = async (req, res) => {
     console.error("Login error:", error.message);
     res.status(500).json({ message: "Internal server error" });
   }
-};
+}
+
+export const register = async (req, res) => {
+  try {
+    const { name, email, password, role = "COMPANY_ADMIN" } = req.body;
+
+    // Validate input
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "Name, email, and password are required" });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: "User with this email already exists" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create new user
+    const newUser = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      role,
+      isActive: true
+    });
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        userId: newUser._id,
+        role: newUser.role,
+        companyId: newUser.companyId,
+        plantId: newUser.plantId
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.status(201).json({ 
+      token, 
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+        phoneNumber: newUser.phoneNumber,
+        position: newUser.position,
+        permissions: newUser.permissions,
+        companyId: newUser.companyId,
+        plantId: newUser.plantId
+      }
+    });
+  } catch (error) {
+    console.error("Registration error:", error.message);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};;

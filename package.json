@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon --watch src --ext js,json src/server.js"
+    "dev": "nodemon --watch src --ext js,json src/server.js",
+    "migrate:approval-email": "node scripts/addApprovalEmailFlag.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

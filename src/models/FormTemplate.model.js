@@ -32,7 +32,10 @@ const fieldSchema = new mongoose.Schema({
     min: Number,
     max: Number,
     regex: String
-  }
+  },
+  
+  // Approval Email Control
+  includeInApprovalEmail: { type: Boolean, default: false }
 }, { _id: false });
 
 const sectionSchema = new mongoose.Schema({
