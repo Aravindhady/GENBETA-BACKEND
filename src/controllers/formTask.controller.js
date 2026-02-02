@@ -143,37 +143,39 @@ export const submitTask = async (req, res) => {
 
     const submission = await FormSubmission.create(submissionData);
 
-    // Notify first approver if sequential approval is required with filtered fields
+    // Notify first approver if sequential approval is required with filtered fields (non-blocking)
     if (finalStatus === "PENDING_APPROVAL") {
-      try {
-        const firstLevel = form.approvalFlow.find(f => f.level === 1);
-        if (firstLevel) {
-          const approver = await User.findById(firstLevel.approverId);
-          const company = await Company.findById(submissionData.companyId);
-          const plant = await Plant.findById(submissionData.plantId);
-          
-          if (approver && approver.email) {
-            const approvalLink = `${process.env.FRONTEND_URL}/approval/${submission._id}`;
-            await sendSubmissionNotificationToApprover(
-              approver.email,
-              form.formName,
-              req.user.name || "Employee",
-              submissionData.submittedAt,
-              approvalLink,
-              [], // previous approvals
-              company,
-              plant,
-              plant?._id?.toString() || req.user.plantId?.toString() || "",
-              form.formId || form._id?.toString() || "",
-              submission._id?.toString() || "",
-              form.fields || [], // form fields for filtering
-              submissionData.data || {} // submission data
-            );
+      setImmediate(async () => {
+        try {
+          const firstLevel = form.approvalFlow.find(f => f.level === 1);
+          if (firstLevel) {
+            const approver = await User.findById(firstLevel.approverId);
+            const company = await Company.findById(submissionData.companyId);
+            const plant = await Plant.findById(submissionData.plantId);
+            
+            if (approver && approver.email) {
+              const approvalLink = `${process.env.FRONTEND_URL}/approval/${submission._id}`;
+              await sendSubmissionNotificationToApprover(
+                approver.email,
+                form.formName,
+                req.user.name || "Employee",
+                submissionData.submittedAt,
+                approvalLink,
+                [], // previous approvals
+                company,
+                plant,
+                plant?._id?.toString() || req.user.plantId?.toString() || "",
+                form.formId || form._id?.toString() || "",
+                submission._id?.toString() || "",
+                form.fields || [], // form fields for filtering
+                submissionData.data || {} // submission data
+              );
+            }
           }
+        } catch (emailError) {
+          console.error("Failed to notify first approver:", emailError);
         }
-      } catch (emailError) {
-        console.error("Failed to notify first approver:", emailError);
-      }
+      });
     }
 
     task.status = "completed";
@@ -394,35 +396,37 @@ export const submitFormDirectly = async (req, res) => {
           formTasks.push(formTask);
         }
 
-        // Notify all approvers with filtered field data
-        for (const approvalLevel of workflow) {
-          try {
-            const approver = await User.findById(approvalLevel.approverId);
-            const company = await Company.findById(submissionData.companyId);
-            const plant = await Plant.findById(submissionData.plantId);
-            
-            if (approver && approver.email) {
-              const approvalLink = `${process.env.FRONTEND_URL}/employee/approval/pending`;
-              await sendSubmissionNotificationToApprover(
-                approver.email,
-                submissionData.formName,
-                submissionData.submittedByName,
-                submissionData.submittedAt,
-                approvalLink,
-                [], // previous approvals (empty for first submission)
-                company,
-                plant,
-                plant?._id?.toString() || submissionData.plantId?.toString() || "",
-                form.formId || form._id?.toString() || "",
-                submission._id?.toString() || "",
-                form.fields || [], // form fields for filtering
-                submissionData.data || {} // submission data
-              );
+        // Notify all approvers with filtered field data (non-blocking)
+        setImmediate(async () => {
+          for (const approvalLevel of workflow) {
+            try {
+              const approver = await User.findById(approvalLevel.approverId);
+              const company = await Company.findById(submissionData.companyId);
+              const plant = await Plant.findById(submissionData.plantId);
+              
+              if (approver && approver.email) {
+                const approvalLink = `${process.env.FRONTEND_URL}/employee/approval/pending`;
+                await sendSubmissionNotificationToApprover(
+                  approver.email,
+                  submissionData.formName,
+                  submissionData.submittedByName,
+                  submissionData.submittedAt,
+                  approvalLink,
+                  [], // previous approvals (empty for first submission)
+                  company,
+                  plant,
+                  plant?._id?.toString() || submissionData.plantId?.toString() || "",
+                  form.formId || form._id?.toString() || "",
+                  submission._id?.toString() || "",
+                  form.fields || [], // form fields for filtering
+                  submissionData.data || {} // submission data
+                );
+              }
+            } catch (emailError) {
+              console.error(`Failed to notify approver ${approvalLevel.approverId}:`, emailError);
             }
-          } catch (emailError) {
-            console.error(`Failed to notify approver ${approvalLevel.approverId}:`, emailError);
           }
-        }
+        });
       } catch (taskError) {
         console.error("Failed to create approval tasks:", taskError);
         // Don't fail the submission if task creation fails, but log the error
