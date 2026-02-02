@@ -545,7 +545,10 @@ export const processApproval = async (req, res) => {
                 plant,
                 plantId,
                 formId,
-                submissionId
+                submissionId,
+                "PLANT_ADMIN",
+                submission.companyId,
+                submission.plantId
               );
             }
           } catch (emailError) {
@@ -597,7 +600,10 @@ export const processApproval = async (req, res) => {
                 plant,
                 plantId,
                 formId,
-                submissionId
+                submissionId,
+                "PLANT_ADMIN",
+                submission.companyId,
+                submission.plantId
               );
             } catch (emailError) {
               console.error("Failed to send final approval notification to plant admin:", emailError);
@@ -617,7 +623,9 @@ export const processApproval = async (req, res) => {
               plantId,
               formId,
               submissionId,
-              submission.currentLevel || 1
+              submission.currentLevel || 1,
+              "PLANT_ADMIN",
+              submission.companyId
             );
           }
         }

@@ -1,5 +1,7 @@
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
+import Company from "../models/Company.model.js";
+import Plant from "../models/Plant.model.js";
 
 dotenv.config();
 
@@ -29,11 +31,42 @@ const createTransporter = () => {
 
 const transporter = createTransporter();
 
-const getFromAddress = () => {
-  if (process.env.EMAIL_USER) {
-    return `"GenBeta" <${process.env.EMAIL_USER}>`;
+/**
+ * Resolve the appropriate sender email based on context
+ * Implements hierarchical email sending: Super Admin → Company → Plant → Employee
+ */
+const resolveEmailSender = async ({ actor, companyId, plantId, fallbackFrom = '"GenBeta" <no-reply@genbeta.com>' }) => {
+  try {
+    // Super Admin level - use platform identity
+    if (actor === "SUPER_ADMIN") {
+      return process.env.PLATFORM_EMAIL || '"GenBeta Platform" <no-reply@genbeta.com>';
+    }
+    
+    // Company Admin level - use company email if available
+    if (actor === "COMPANY_ADMIN" && companyId) {
+      const company = await Company.findById(companyId).select("email name");
+      if (company && company.email) {
+        return `"${company.name} Admin" <${company.email}>`;
+      }
+    }
+    
+    // Plant Admin level - use plant email, fallback to company email
+    if ((actor === "PLANT_ADMIN" || actor === "EMPLOYEE") && plantId) {
+      const plant = await Plant.findById(plantId).populate("companyId", "email name").select("email name");
+      if (plant) {
+        // Prefer plant-specific email, then company email, then fallback
+        const fromEmail = plant.email || plant.companyId?.email || process.env.PLATFORM_EMAIL || "no-reply@genbeta.com";
+        const fromName = plant.name || plant.companyId?.name || "GenBeta";
+        return `"${fromName}" <${fromEmail}>`;
+      }
+    }
+    
+    // Fallback to default
+    return fallbackFrom;
+  } catch (error) {
+    console.error("Error resolving email sender:", error);
+    return fallbackFrom;
   }
-  return `"GenBeta" <${process.env.SMTP_FROM}>`;
 };
 
 /**
@@ -74,7 +107,7 @@ const getBaseLayout = (content, company = {}, plant = {}) => {
   `;
 };
 
-export const sendApprovalEmail = async (to, formName, link, company = {}, plant = {}) => {
+export const sendApprovalEmail = async (to, formName, link, company = {}, plant = {}, actor = "PLANT_ADMIN", companyId = null, plantId = null) => {
   const content = `
     <h2 style="color: #4f46e5;">Form Approval Request</h2>
     <p>You have been requested to fill out and approve the following form:</p>
@@ -92,8 +125,16 @@ export const sendApprovalEmail = async (to, formName, link, company = {}, plant 
   const formIdMatch = formName.match(/(\w+-\w+-\d{4}-\w+)/);
   const formId = formIdMatch ? formIdMatch[1] : 'FORM-ID';
   
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Approval Required] ${formId} – ${formName} | Level 1 Approval`,
     html: getBaseLayout(content, company, plant)
@@ -114,7 +155,7 @@ export const sendApprovalEmail = async (to, formName, link, company = {}, plant 
   }
 };
 
-export const sendWelcomeEmail = async (to, name, role, companyName, loginUrl, password, company = {}) => {
+export const sendWelcomeEmail = async (to, name, role, companyName, loginUrl, password, company = {}, plant = {}, actor = "SYSTEM", companyId = null, plantId = null) => {
   let roleLabel = "";
   switch(role) {
     case "COMPANY_ADMIN":
@@ -175,11 +216,19 @@ export const sendWelcomeEmail = async (to, name, role, companyName, loginUrl, pa
     </p>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `Welcome to ${companyName} - Your Account Has Been Created`,
-    html: getBaseLayout(content, company)
+    html: getBaseLayout(content, company, plant)
   };
 
   try {
@@ -200,7 +249,7 @@ export const sendWelcomeEmail = async (to, name, role, companyName, loginUrl, pa
   }
 };
 
-export const sendPlantCreatedEmail = async (to, plantName, plantCode, companyName, company = {}, plant = {}) => {
+export const sendPlantCreatedEmail = async (to, plantName, plantCode, companyName, company = {}, plant = {}, actor = "COMPANY_ADMIN", companyId = null, plantId = null) => {
   const content = `
     <h1 style="color: #4f46e5; margin: 0 0 20px 0; text-align: center;">New Plant Created</h1>
     
@@ -221,29 +270,37 @@ export const sendPlantCreatedEmail = async (to, plantName, plantCode, companyNam
     </p>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `New Plant Created - ${plantName}`,
     html: getBaseLayout(content, company, plant)
   };
 
-    try {
-      const info = await transporter.sendMail(mailOptions);
-      console.log("Plant created email sent: %s", info.messageId);
-      return info;
-    } catch (error) {
-      console.error("Plant created email failed, logging to console instead:");
-      console.log("-----------------------------------------");
-      console.log(`TO: ${to}`);
-      console.log(`PLANT: ${plantName} (${plantCode})`);
-      console.log(`COMPANY: ${companyName}`);
-      console.log("-----------------------------------------");
-      return { messageId: "mock-id", skipped: true };
-    }
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log("Plant created email sent: %s", info.messageId);
+    return info;
+  } catch (error) {
+    console.error("Plant created email failed, logging to console instead:");
+    console.log("-----------------------------------------");
+    console.log(`TO: ${to}`);
+    console.log(`PLANT: ${plantName} (${plantCode})`);
+    console.log(`COMPANY: ${companyName}`);
+    console.log("-----------------------------------------");
+    return { messageId: "mock-id", skipped: true };
+  }
 };
 
-export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "", formFields = [], submissionData = {}) => {
+export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "", formFields = [], submissionData = {}, actor = "PLANT_ADMIN", companyId = null) => {
   let approvalContext = "";
   if (previousApprovals.length > 0) {
     const lastApproval = previousApprovals[previousApprovals.length - 1];
@@ -270,7 +327,7 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
         </tr>
       `;
     }).join('');
-    
+
     approvalSummaryHtml = `
       <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; margin: 20px 0; overflow: hidden;">
         <div style="background-color: #f3f4f6; padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">
@@ -301,9 +358,17 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
     </div>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   // Use standardized subject format for employee submission
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Form Submitted] ${formId || 'FORM-ID'} – ${formName} | Submitted by ${submitterName}`,
     html: getBaseLayout(content, company, plant)
@@ -318,7 +383,7 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
   }
 };
 
-export const sendFormCreatedApproverNotification = async (to, formName, creatorName, link, company = {}, plant = {}) => {
+export const sendFormCreatedApproverNotification = async (to, formName, creatorName, link, company = {}, plant = {}, actor = "PLANT_ADMIN", companyId = null, plantId = null) => {
   const content = `
     <h2 style="color: #4f46e5;">New Form Awaiting Your Approval</h2>
     <p style="color: #1f2937; font-size: 16px;">
@@ -334,8 +399,16 @@ export const sendFormCreatedApproverNotification = async (to, formName, creatorN
     <p style="margin-top: 20px; font-size: 12px; color: #6b7280;">If you were not expecting this email, please contact your administrator.</p>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `Action Required: Form Approval - ${formName}`,
     html: getBaseLayout(content, company, plant)
@@ -357,7 +430,7 @@ export const sendFormCreatedApproverNotification = async (to, formName, creatorN
   }
 };
 
-export const sendSubmissionNotificationToPlant = async (to, formName, submitterName, submittedAt, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendSubmissionNotificationToPlant = async (to, formName, submitterName, submittedAt, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "EMPLOYEE", companyId = null) => {
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
   
   const content = `
@@ -376,8 +449,16 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
     </div>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Form Submitted] ${formId || 'FORM-ID'} – ${formName} | Submitted by ${submitterName}`,
     html: getBaseLayout(content, company, plant)
@@ -393,7 +474,7 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
   }
 };
 
-export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", level = 1) => {
+export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", level = 1, actor = "PLANT_ADMIN", companyId = null, plantIdParam = null) => {
   const isApproved = status.toUpperCase() === "APPROVED";
   const statusColor = isApproved ? "#10b981" : "#ef4444";
   const statusText = isApproved ? "Approved" : "Rejected";
@@ -420,8 +501,16 @@ export const sendApprovalStatusNotificationToPlant = async (to, formName, submit
     ? `[Form Approved] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Approved by ${approverName}`
     : `[Form Rejected] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Rejected by ${approverName}`;
   
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId: plantIdParam || plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: subject,
     html: getBaseLayout(content, company, plant)
@@ -437,7 +526,7 @@ export const sendApprovalStatusNotificationToPlant = async (to, formName, submit
   }
 };
 
-export const sendRejectionNotificationToSubmitter = async (to, formName, rejectorName, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendRejectionNotificationToSubmitter = async (to, formName, rejectorName, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "PLANT_ADMIN", companyId = null) => {
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
   
   const content = `
@@ -457,8 +546,16 @@ export const sendRejectionNotificationToSubmitter = async (to, formName, rejecto
   `;
 
   // Use standardized rejection subject format
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Form Rejected] ${formId || 'FORM-ID'} – ${formName} | Rejected at Level 1`,
     html: getBaseLayout(content, company, plant)
@@ -466,15 +563,15 @@ export const sendRejectionNotificationToSubmitter = async (to, formName, rejecto
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log("Rejection notification sent: %s", info.messageId);
+    console.log("Rejection notification to submitter sent: %s", info.messageId);
     return info;
   } catch (error) {
-    console.error("Rejection notification failed:", error);
+    console.error("Rejection notification to submitter failed:", error);
     return { messageId: "mock-id", skipped: true };
   }
 };
 
-export const sendProfileUpdateNotification = async (to, employeeName, updatedFields, updatedBy, company = {}, plant = {}) => {
+export const sendProfileUpdateNotification = async (to, employeeName, updatedFields, updatedBy, company = {}, plant = {}, actor = "COMPANY_ADMIN", companyId = null, plantId = null) => {
   const fieldsHtml = Object.entries(updatedFields)
     .filter(([_, value]) => value !== undefined && value !== null)
     .map(([key, value]) => `<li style="margin: 5px 0;"><strong>${key}:</strong> ${value}</li>`)
@@ -496,8 +593,16 @@ export const sendProfileUpdateNotification = async (to, employeeName, updatedFie
     </p>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `Your Profile Has Been Updated`,
     html: getBaseLayout(content, company, plant)
@@ -513,7 +618,7 @@ export const sendProfileUpdateNotification = async (to, employeeName, updatedFie
   }
 };
 
-export const sendFinalApprovalNotificationToSubmitter = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendFinalApprovalNotificationToSubmitter = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "PLANT_ADMIN", companyId = null, plantIdParam = null) => {
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
   const historyHtml = approvalHistory.map(h => `
     <li style="margin-bottom: 10px;">
@@ -537,8 +642,16 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
   `;
 
   // Use standardized subject format for final approval
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId: plantIdParam,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Form Fully Approved] ${formId || 'FORM-ID'} – ${formName} | Final Approval Completed`,
     html: getBaseLayout(content, company, plant)
@@ -553,7 +666,7 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
   }
 };
 
-export const sendFinalApprovalNotificationToPlant = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "") => {
+export const sendFinalApprovalNotificationToPlant = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "PLANT_ADMIN", companyId = null, plantIdParam = null) => {
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
   const historyHtml = approvalHistory.map(h => `
     <li style="margin-bottom: 10px;">
@@ -576,8 +689,16 @@ export const sendFinalApprovalNotificationToPlant = async (to, formName, submitt
     </div>
   `;
 
+  // Determine the appropriate sender based on context
+  const fromAddress = await resolveEmailSender({
+    actor,
+    companyId,
+    plantId: plantIdParam,
+    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+  });
+
   const mailOptions = {
-    from: getFromAddress(),
+    from: fromAddress,
     to,
     subject: `[Form Fully Approved] ${formId || 'FORM-ID'} – ${formName} | Final Approval Completed`,
     html: getBaseLayout(content, company, plant)
