@@ -2,9 +2,9 @@ import User from "../models/User.model.js";
 import Company from "../models/Company.model.js";
 import bcrypt from "bcryptjs";
 import { validateEmployeeCreation } from "../utils/planLimits.js";
-import { sendWelcomeEmail, sendProfileUpdateNotification } from "../services/email.service.js";
+import { sendWelcomeEmail } from "../services/email.service.js";
 import Plant from "../models/Plant.model.js";
-import { generateCacheKey, getFromCache, setInCache } from "../utils/cache.js";
+import { generateCacheKey, deleteFromCache } from "../utils/cache.js";
 
 export const getUsers = async (req, res) => {
   try {
@@ -34,107 +34,91 @@ export const getUsers = async (req, res) => {
       ];
     }
 
-    // Handle pagination
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-    
-    // Generate cache key
-    const cacheParams = { page, limit, role: req.user.role };
-    if (filter.companyId) cacheParams.companyId = filter.companyId;
-    if (filter.plantId) cacheParams.plantId = filter.plantId;
-    if (filter.role) cacheParams.role = filter.role;
-    if (req.query.search) cacheParams.search = req.query.search;
-    const cacheKey = generateCacheKey('users', cacheParams);
-    
-    // Try to get from cache first
-    let cachedResult = await getFromCache(cacheKey);
-    if (cachedResult) {
-      return res.json(cachedResult);
-    }
-
-    // Count total users for pagination metadata
-    const total = await User.countDocuments(filter);
-
-    // Get paginated users
     const users = await User.find(filter)
-      .select("-password")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-    
-    const result = {
-      success: true,
-      data: users,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        total,
-        hasNext: page < Math.ceil(total / limit),
-        hasPrev: page > 1
-      }
-    };
-    
-    // Cache the result for 5 minutes
-    await setInCache(cacheKey, result, 300);
+      .populate("companyId", "name")
+      .populate("plantId", "name");
 
-    res.json(result);
+    res.json({ success: true, data: users });
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch users" });
   }
 };
 
-export const updateAdmin = async (req, res) => {
+export const getProfile = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const user = await User.findById(req.user.userId)
+      .populate("companyId", "name logoUrl gstNumber address templateFeatureEnabled")
+      .populate("plantId", "name plantNumber location code templateFeatureEnabled");
 
-    const updateData = { name, email };
-
-    if (password) {
-      updateData.password = await bcrypt.hash(password, 10);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const updated = await User.findByIdAndUpdate(
-      req.params.id,
+    // Check template feature status
+    let templateFeatureEnabled = false;
+    if (user.plantId) {
+      // If plant has explicit setting, use it; otherwise inherit from company
+      if (user.plantId.templateFeatureEnabled !== null && user.plantId.templateFeatureEnabled !== undefined) {
+        templateFeatureEnabled = user.plantId.templateFeatureEnabled;
+      } else {
+        templateFeatureEnabled = user.companyId?.templateFeatureEnabled || false;
+      }
+    } else if (user.companyId) {
+      templateFeatureEnabled = user.companyId.templateFeatureEnabled || false;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          phoneNumber: user.phoneNumber,
+          position: user.position,
+          permissions: user.permissions,
+          companyId: user.companyId?._id || user.companyId,
+          companyName: user.companyId?.name,
+          companyLogo: user.companyId?.logoUrl,
+          companyGst: user.companyId?.gstNumber,
+          companyAddress: user.companyId?.address,
+          plantId: user.plantId?._id || user.plantId,
+          plantName: user.plantId?.name,
+          plantNumber: user.plantId?.plantNumber,
+          plantLocation: user.plantId?.location,
+          plantCode: user.plantId?.code,
+          templateFeatureEnabled: templateFeatureEnabled
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Get profile error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch profile" });
+  }
+};
+
+export const updateProfile = async (req, res) => {
+  try {
+    const { name, email, phoneNumber, position } = req.body;
+
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (phoneNumber) updateData.phoneNumber = phoneNumber;
+    if (position) updateData.position = position;
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user.userId,
       updateData,
       { new: true }
     );
 
-    res.json({
-      message: "Admin updated successfully",
-      updated
-    });
+    res.json({ success: true, data: updatedUser });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to update admin" });
-  }
-};
-
-export const getPlantEmployees = async (req, res) => {
-  try {
-    const { plantId } = req.params;
-    
-    // Generate cache key
-    const cacheKey = generateCacheKey('plantEmployees', { plantId });
-    
-    // Try to get from cache first
-    let cachedResult = await getFromCache(cacheKey);
-    if (cachedResult) {
-      return res.json(cachedResult);
-    }
-    
-    const employees = await User.find({ plantId, role: "EMPLOYEE", isActive: { $ne: false } }).select("-password");
-    
-    const result = { success: true, data: employees };
-    
-    // Cache the result for 5 minutes
-    await setInCache(cacheKey, result, 300);
-    
-    res.json(result);
-  } catch (error) {
-    console.error("getPlantEmployees error:", error);
-    res.status(500).json({ success: false, message: "Failed to get employees" });
+    console.error("Update profile error:", error);
+    res.status(500).json({ success: false, message: "Failed to update profile" });
   }
 };
 
@@ -184,13 +168,14 @@ export const createEmployee = async (req, res) => {
       console.error('Cache invalidation error:', cacheError);
     }
 
-    // Send welcome email
+    // Send welcome email asynchronously (don't await it)
     try {
       const company = await Company.findById(targetCompanyId);
       const companyName = company ? company.name : "Your Company";
       const loginUrl = process.env.CLIENT_URL || "http://localhost:5173";
       
-      await sendWelcomeEmail(
+      // Don't await this - let it run in the background
+      sendWelcomeEmail(
         email,
         name,
         "EMPLOYEE",
@@ -198,10 +183,12 @@ export const createEmployee = async (req, res) => {
         loginUrl,
         password, // Send the raw password
         company
-      );
+      ).catch(emailError => {
+        console.error("Failed to send welcome email to employee:", emailError);
+      });
     } catch (emailError) {
-      console.error("Failed to send welcome email to employee:", emailError);
-      // Don't fail the request if email fails
+      console.error("Error preparing welcome email:", emailError);
+      // Don't fail the request if email preparation fails
     }
 
     res.status(201).json({
@@ -223,173 +210,100 @@ export const createEmployee = async (req, res) => {
 export const updateEmployee = async (req, res) => {
   try {
     const { name, email, position, phoneNumber } = req.body;
-    const employeeId = req.params.id;
 
-    const employee = await User.findById(employeeId);
-    if (!employee) {
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (position) updateData.position = position;
+    if (phoneNumber) updateData.phoneNumber = phoneNumber;
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true }
+    );
+
+    if (!updatedUser) {
       return res.status(404).json({ message: "Employee not found" });
     }
 
-    if (req.user.role === "PLANT_ADMIN" && employee.plantId?.toString() !== req.user.plantId?.toString()) {
-      return res.status(403).json({ message: "Not authorized to update this employee" });
-    }
-
-    if (email && email !== employee.email) {
-      const existingUser = await User.findOne({ email, _id: { $ne: employeeId } });
-      if (existingUser) {
-        return res.status(400).json({ message: "Email already in use" });
-      }
-    }
-
-    const updatedFields = {};
-    if (name && name !== employee.name) updatedFields.Name = name;
-    if (email && email !== employee.email) updatedFields.Email = email;
-    if (position && position !== employee.position) updatedFields.Position = position;
-    if (phoneNumber && phoneNumber !== employee.phoneNumber) updatedFields["Phone Number"] = phoneNumber;
-
-    const updated = await User.findByIdAndUpdate(
-      employeeId,
-      { name, email, position, phoneNumber },
-      { new: true }
-    ).select("-password");
-
-    // Invalidate cache for plant employees
-    try {
-      const employee = await User.findById(employeeId);
-      if (employee && employee.plantId) {
-        const cacheKey = generateCacheKey('plantEmployees', { plantId: employee.plantId.toString() });
-        await deleteFromCache(cacheKey);
-      }
-    } catch (cacheError) {
-      console.error('Cache invalidation error:', cacheError);
-    }
-
-    if (Object.keys(updatedFields).length > 0) {
-      (async () => {
-        try {
-          const updater = await User.findById(req.user.id);
-          const company = await Company.findById(employee.companyId);
-          const plant = await Plant.findById(employee.plantId);
-          
-          await sendProfileUpdateNotification(
-            updated.email,
-            updated.name,
-            updatedFields,
-            updater?.name || "Administrator",
-            company,
-            plant
-          );
-        } catch (emailErr) {
-          console.error("Failed to send profile update email:", emailErr);
-        }
-      })();
-    }
-
-    res.json({ message: "Employee updated successfully", user: updated });
+    res.json({ success: true, data: updatedUser });
   } catch (error) {
-    console.error("updateEmployee error:", error);
-    res.status(500).json({ message: "Failed to update employee" });
+    console.error("Update employee error:", error);
+    res.status(500).json({ success: false, message: "Failed to update employee" });
   }
 };
 
 export const deleteEmployee = async (req, res) => {
   try {
-    const employeeId = req.params.id;
-
-    const employee = await User.findById(employeeId);
-    if (!employee) {
+    const user = await User.findById(req.params.id);
+    if (!user) {
       return res.status(404).json({ message: "Employee not found" });
     }
 
-    if (req.user.role === "PLANT_ADMIN" && employee.plantId?.toString() !== req.user.plantId?.toString()) {
-      return res.status(403).json({ message: "Not authorized to delete this employee" });
+    if (user.role !== "EMPLOYEE") {
+      return res.status(400).json({ message: "Cannot delete non-employee users" });
     }
 
-    await User.findByIdAndUpdate(employeeId, { isActive: false });
+    await User.findByIdAndUpdate(req.params.id, { isActive: false });
 
-    // Invalidate cache for plant employees
-    try {
-      const employee = await User.findById(employeeId);
-      if (employee && employee.plantId) {
-        const cacheKey = generateCacheKey('plantEmployees', { plantId: employee.plantId.toString() });
-        await deleteFromCache(cacheKey);
-      }
-    } catch (cacheError) {
-      console.error('Cache invalidation error:', cacheError);
-    }
-
-    res.json({ message: "Employee deleted successfully" });
+    res.json({ success: true, message: "Employee removed successfully" });
   } catch (error) {
-    console.error("deleteEmployee error:", error);
-    res.status(500).json({ message: "Failed to delete employee" });
+    console.error("Delete employee error:", error);
+    res.status(500).json({ success: false, message: "Failed to remove employee" });
   }
 };
 
-/* ======================================================
-   GET PROFILE
-====================================================== */
-export const getProfile = async (req, res) => {
+export const getPlantEmployees = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const user = await User.findById(userId).select("-password");
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    const { plantId } = req.params;
+
+    // Verify authorization
+    if (req.user.role === "PLANT_ADMIN" && plantId !== req.user.plantId.toString()) {
+      return res.status(403).json({ success: false, message: "Unauthorized to access this plant's employees" });
     }
-    res.json({
-      success: true,
-      user
-    });
+
+    const employees = await User.find({
+      plantId: plantId,
+      role: "EMPLOYEE",
+      isActive: true
+    }).select("name email position createdAt");
+
+    res.json({ success: true, data: employees });
   } catch (error) {
-    console.error("getProfile error:", error);
-    res.status(500).json({ message: "Failed to get profile" });
+    console.error("Get plant employees error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch plant employees" });
   }
 };
 
-/* ======================================================
-   UPDATE PROFILE
-====================================================== */
-export const updateProfile = async (req, res) => {
+export const updateAdmin = async (req, res) => {
   try {
     const { name, email, password, profileImage, phoneNumber, position } = req.body;
-    const userId = req.user.id;
 
-    const user = await User.findById(userId);
-    if (!user) {
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (profileImage) updateData.profileImage = profileImage;
+    if (phoneNumber) updateData.phoneNumber = phoneNumber;
+    if (position) updateData.position = position;
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updateData.password = hashedPassword;
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true }
+    );
+
+    if (!updatedUser) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if (name) user.name = name;
-    if (email) {
-      const existingUser = await User.findOne({ email, _id: { $ne: userId } });
-      if (existingUser) {
-        return res.status(400).json({ message: "Email already in use" });
-      }
-      user.email = email;
-    }
-    if (password) {
-      user.password = await bcrypt.hash(password, 10);
-    }
-    if (profileImage) user.profileImage = profileImage;
-    if (phoneNumber) user.phoneNumber = phoneNumber;
-    if (position) user.position = position;
-
-    await user.save();
-
-    res.json({
-      success: true,
-      message: "Profile updated successfully",
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        profileImage: user.profileImage,
-        phoneNumber: user.phoneNumber,
-        position: user.position
-      }
-    });
+    res.json({ success: true, data: updatedUser });
   } catch (error) {
-    console.error("updateProfile error:", error);
-    res.status(500).json({ message: "Failed to update profile" });
+    console.error("Update admin error:", error);
+    res.status(500).json({ success: false, message: "Failed to update admin" });
   }
 };
