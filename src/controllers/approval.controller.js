@@ -563,12 +563,19 @@ export const processApproval = async (req, res) => {
     // Send notification to plant admin about approval status (non-blocking)
     (async () => {
       try {
-        const plant = await Plant.findById(submission.plantId).populate("adminId");
+        const plant = await Plant.findById(submission.plantId);
         const company = await Company.findById(submission.companyId);
         const submitter = await User.findById(submission.submittedBy);
         const approver = await User.findById(userId);
         
-        if (plant?.adminId?.email) {
+        // Find plant admin by querying User model
+        const plantAdmin = await User.findOne({
+          plantId: submission.plantId,
+          role: "PLANT_ADMIN",
+          isActive: true
+        });
+        
+        if (plantAdmin?.email) {
           const viewLink = `${process.env.FRONTEND_URL}/plant/submissions/${submission._id}`;
           const plantId = plant?.plantNumber || plant?._id?.toString() || submission.plantId?.toString() || "";
           const formId = (form?.numericalId || submission.formNumericalId)?.toString() || form?.formId || form?._id?.toString() || "";
@@ -592,7 +599,7 @@ export const processApproval = async (req, res) => {
               
               // Notify plant admin of final approval
               await sendFinalApprovalNotificationToPlant(
-                plant.adminId.email,  // Send to plant admin
+                plantAdmin.email,  // Send to plant admin
                 form.formName || form.templateName,
                 submission.createdAt,
                 historyWithNames, // Pass populated approval history
@@ -603,7 +610,9 @@ export const processApproval = async (req, res) => {
                 submissionId,
                 "PLANT_ADMIN",
                 submission.companyId,
-                submission.plantId
+                submission.plantId,
+                approver?.email || null, // approverEmail
+                approver?.name || "An approver" // approverName
               );
             } catch (emailError) {
               console.error("Failed to send final approval notification to plant admin:", emailError);
@@ -611,7 +620,7 @@ export const processApproval = async (req, res) => {
           } else {
             // Send regular approval status notification for intermediate approvals
             await sendApprovalStatusNotificationToPlant(
-              plant.adminId.email,
+              plantAdmin.email,
               form.formName || form.templateName,
               submitter?.name || "An employee",
               approver?.name || "An approver",
@@ -625,7 +634,9 @@ export const processApproval = async (req, res) => {
               submissionId,
               submission.currentLevel || 1,
               "PLANT_ADMIN",
-              submission.companyId
+              submission.companyId,
+              null, // plantIdParam
+              approver?.email || null // approverEmail
             );
           }
         }

@@ -5,6 +5,7 @@ import Company from "../models/Company.model.js";
 import Plant from "../models/Plant.model.js";
 import mongoose from "mongoose";
 import { uploadToCloudinary } from "../utils/cloudinary.js";
+import { sendSubmissionNotificationToApprover } from "../services/email.service.js";
 import fs from "fs";
 
 /* ======================================================
@@ -133,6 +134,7 @@ export const getSubmissions = async (req, res) => {
       .populate("submittedBy", "name email")
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
+      .populate("formId", "formName")
       .sort(sort)
       .skip(skip)
       .limit(parseInt(limit));
@@ -409,17 +411,16 @@ export const getSubmissionStats = async (req, res) => {
     };
 
     stats.forEach(stat => {
-      formattedStats[stat._id.toLowerCase()] = stat.count;
+      const statusKey = stat._id.toLowerCase().replace('-', '_');
+      formattedStats[statusKey] = stat.count;
     });
 
     const total = Object.values(formattedStats).reduce((sum, count) => sum + count, 0);
+    formattedStats.total = total;
 
     res.json({
       success: true,
-      data: {
-        ...formattedStats,
-        total
-      }
+      data: formattedStats
     });
 
   } catch (error) {

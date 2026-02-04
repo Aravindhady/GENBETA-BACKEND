@@ -120,8 +120,9 @@ export const getPlants = async (req, res) => {
     // Count total plants for pagination metadata
     const total = await Plant.countDocuments(filter);
 
-    // Get paginated plants
+    // Get paginated plants with company data
     const plants = await Plant.find(filter)
+      .populate('companyId', 'name logoUrl')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
@@ -131,6 +132,7 @@ export const getPlants = async (req, res) => {
         const admin = await User.findOne({ plantId: plant._id, role: "PLANT_ADMIN" }).select("name email");
         return {
           ...plant.toObject(),
+          company: plant.companyId,
           adminName: admin?.name || "N/A",
           adminEmail: admin?.email || "N/A"
         };

@@ -300,7 +300,7 @@ export const sendPlantCreatedEmail = async (to, plantName, plantCode, companyNam
   }
 };
 
-export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "", formFields = [], submissionData = {}, actor = "PLANT_ADMIN", companyId = null) => {
+export const sendSubmissionNotificationToApprover = async (to, formName, submitterName, submittedAt, link, previousApprovals = [], company = {}, plant = {}, plantId = "", formId = "", submissionId = "", formFields = [], submissionData = {}, actor = "PLANT_ADMIN", companyId = null, submitterEmail = null) => {
   let approvalContext = "";
   if (previousApprovals.length > 0) {
     const lastApproval = previousApprovals[previousApprovals.length - 1];
@@ -358,8 +358,10 @@ export const sendSubmissionNotificationToApprover = async (to, formName, submitt
     </div>
   `;
 
-  // Determine the appropriate sender based on context
-  const fromAddress = await resolveEmailSender({
+  // Use submitter's email as sender if provided, otherwise use resolved sender
+  const fromAddress = submitterEmail 
+    ? `"${submitterName}" <${submitterEmail}>`
+    : await resolveEmailSender({
     actor,
     companyId,
     plantId,
@@ -441,7 +443,6 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
     <div style="background-color: #f3f4f6; padding: 15px; border-radius: 5px; margin: 20px 0;">
       <strong style="font-size: 18px;">${formName}</strong>
       <p style="margin: 10px 0 0 0; font-size: 14px; color: #6b7280;">Submitted at: ${new Date(submittedAt).toLocaleString()}</p>
-      ${identifier ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280; font-family: monospace;">${identifier}</p>` : ''}
     </div>
     <p>Click below to view the submission details.</p>
     <div style="text-align: center; margin: 30px 0;">
@@ -474,7 +475,7 @@ export const sendSubmissionNotificationToPlant = async (to, formName, submitterN
   }
 };
 
-export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", level = 1, actor = "PLANT_ADMIN", companyId = null, plantIdParam = null) => {
+export const sendApprovalStatusNotificationToPlant = async (to, formName, submitterName, approverName, status, comments, link, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", level = 1, actor = "PLANT_ADMIN", companyId = null, plantIdParam = null, approverEmail = null) => {
   const isApproved = status.toUpperCase() === "APPROVED";
   const statusColor = isApproved ? "#10b981" : "#ef4444";
   const statusText = isApproved ? "Approved" : "Rejected";
@@ -489,7 +490,6 @@ export const sendApprovalStatusNotificationToPlant = async (to, formName, submit
       <strong style="font-size: 18px;">${formName}</strong>
       <p style="margin: 10px 0 0 0; font-size: 14px; color: #6b7280;">Status: <span style="color: ${statusColor}; font-weight: bold;">${statusText}</span></p>
       ${comments ? `<p style="margin: 10px 0 0 0; font-size: 14px; color: #6b7280;">Comments: "${comments}"</p>` : ''}
-      ${identifier ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280; font-family: monospace;">${identifier}</p>` : ''}
     </div>
     <div style="text-align: center; margin: 30px 0;">
       <a href="${link}" style="display: inline-block; background-color: #4f46e5; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">View Submission</a>
@@ -501,13 +501,15 @@ export const sendApprovalStatusNotificationToPlant = async (to, formName, submit
     ? `[Form Approved] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Approved by ${approverName}`
     : `[Form Rejected] ${formId || 'FORM-ID'} – ${formName} | Level ${level} Rejected by ${approverName}`;
   
-  // Determine the appropriate sender based on context
-  const fromAddress = await resolveEmailSender({
-    actor,
-    companyId,
-    plantId: plantIdParam || plantId,
-    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
-  });
+  // Use approver's email as sender if provided, otherwise use resolved sender
+  const fromAddress = approverEmail 
+    ? `"${approverName}" <${approverEmail}>`
+    : await resolveEmailSender({
+        actor,
+        companyId,
+        plantId: plantIdParam || plantId,
+        fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+      });
 
   const mailOptions = {
     from: fromAddress,
@@ -537,7 +539,6 @@ export const sendRejectionNotificationToSubmitter = async (to, formName, rejecto
     <div style="background-color: #fef2f2; border: 1px solid #fecaca; padding: 15px; border-radius: 5px; margin: 20px 0;">
       <strong style="color: #991b1b;">Reason for Rejection:</strong>
       <p style="margin: 10px 0 0 0; color: #7f1d1d;">"${comments}"</p>
-      ${identifier ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #7f1d1d; font-family: monospace;">${identifier}</p>` : ''}
     </div>
     <p>Please review the feedback and make necessary corrections before resubmitting.</p>
     <div style="text-align: center; margin: 30px 0;">
@@ -632,7 +633,6 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
     <p style="color: #1f2937; font-size: 16px;">
       Your submission for <strong>${formName}</strong> at ${new Date(submittedAt).toLocaleString()} has been fully verified and approved.
     </p>
-    ${identifier ? `<p style="color: #6b7280; font-size: 12px; font-family: monospace; background-color: #f3f4f6; padding: 10px; border-radius: 4px; margin: 15px 0;">${identifier}</p>` : ''}
     <div style="margin: 25px 0;">
       <h4 style="color: #374151; margin-bottom: 15px;">Approval History:</h4>
       <ul style="color: #4b5563; padding-left: 20px;">
@@ -666,7 +666,7 @@ export const sendFinalApprovalNotificationToSubmitter = async (to, formName, sub
   }
 };
 
-export const sendFinalApprovalNotificationToPlant = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "PLANT_ADMIN", companyId = null, plantIdParam = null) => {
+export const sendFinalApprovalNotificationToPlant = async (to, formName, submittedAt, approvalHistory, company = {}, plant = {}, plantId = "", formId = "", submissionId = "", actor = "PLANT_ADMIN", companyId = null, plantIdParam = null, approverEmail = null, approverName = null) => {
   const identifier = submissionId ? `${plantId}_${formId}_${formName}_${submissionId}` : `${plantId}_${formId}_${formName}`;
   const historyHtml = approvalHistory.map(h => `
     <li style="margin-bottom: 10px;">
@@ -680,7 +680,6 @@ export const sendFinalApprovalNotificationToPlant = async (to, formName, submitt
     <p style="color: #1f2937; font-size: 16px;">
       The submission for <strong>${formName}</strong> at ${new Date(submittedAt).toLocaleString()} has been fully verified and approved.
     </p>
-    ${identifier ? `<p style="color: #6b7280; font-size: 12px; font-family: monospace; background-color: #f3f4f6; padding: 10px; border-radius: 4px; margin: 15px 0;">${identifier}</p>` : ''}
     <div style="margin: 25px 0;">
       <h4 style="color: #374151; margin-bottom: 15px;">Approval History:</h4>
       <ul style="color: #4b5563; padding-left: 20px;">
@@ -688,14 +687,16 @@ export const sendFinalApprovalNotificationToPlant = async (to, formName, submitt
       </ul>
     </div>
   `;
-
-  // Determine the appropriate sender based on context
-  const fromAddress = await resolveEmailSender({
-    actor,
-    companyId,
-    plantId: plantIdParam,
-    fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
-  });
+  
+  // Use approver's email as sender if provided, otherwise use resolved sender
+  const fromAddress = approverEmail && approverName
+    ? `"${approverName}" <${approverEmail}>`
+    : await resolveEmailSender({
+        actor,
+        companyId,
+        plantId: plantIdParam,
+        fallbackFrom: `"GenBeta" <${process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@genbeta.com'}>`
+      });
 
   const mailOptions = {
     from: fromAddress,

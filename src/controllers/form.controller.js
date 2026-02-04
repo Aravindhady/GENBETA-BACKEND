@@ -220,6 +220,9 @@ export const updateForm = async (req, res) => {
       delete finalPayload.approvalLevels;
     }
 
+    // Get the original form to check if approval workflow is being added/changed
+    const originalForm = await Form.findById(req.params.id);
+    
     const updated = await Form.findByIdAndUpdate(
       req.params.id,
       finalPayload,
@@ -228,6 +231,43 @@ export const updateForm = async (req, res) => {
 
     if (!updated) {
       return res.status(404).json({ success: false, message: "Form not found" });
+    }
+
+    // Send email notifications to approvers when workflow is assigned/updated
+    if (finalPayload.approvalFlow && finalPayload.approvalFlow.length > 0) {
+      // Check if this is a new workflow assignment or an update
+      const isWorkflowUpdate = !originalForm.approvalFlow || originalForm.approvalFlow.length === 0 || 
+                              JSON.stringify(originalForm.approvalFlow) !== JSON.stringify(finalPayload.approvalFlow);
+      
+      if (isWorkflowUpdate) {
+        (async () => {
+          try {
+            const updater = await User.findById(req.user.userId);
+            const company = await Company.findById(req.user.companyId);
+            const plant = await Plant.findById(req.user.plantId);
+            
+            for (const level of finalPayload.approvalFlow) {
+              const approver = await User.findById(level.approverId);
+              if (approver && approver.email) {
+                const reviewLink = `${process.env.FRONTEND_URL}/plant/forms/${updated._id}`;
+                await sendFormCreatedApproverNotification(
+                  approver.email,
+                  updated.formName,
+                  updater?.name || "A plant admin",
+                  reviewLink,
+                  company,
+                  plant,
+                  "PLANT_ADMIN",
+                  req.user.companyId,
+                  req.user.plantId
+                );
+              }
+            }
+          } catch (emailErr) {
+            console.error("Failed to send workflow assignment notifications:", emailErr);
+          }
+        })();
+      }
     }
 
     res.json({

@@ -168,7 +168,10 @@ export const submitTask = async (req, res) => {
                 form.formId || form._id?.toString() || "",
                 submission._id?.toString() || "",
                 form.fields || [], // form fields for filtering
-                submissionData.data || {} // submission data
+                submissionData.data || {}, // submission data
+                "PLANT_ADMIN",
+                submissionData.companyId,
+                req.user.email || null // submitter email
               );
             }
           }
@@ -419,7 +422,10 @@ export const submitFormDirectly = async (req, res) => {
                   form.formId || form._id?.toString() || "",
                   submission._id?.toString() || "",
                   form.fields || [], // form fields for filtering
-                  submissionData.data || {} // submission data
+                  submissionData.data || {}, // submission data
+                  "PLANT_ADMIN",
+                  submissionData.companyId,
+                  submissionData.submittedByEmail || null // submitter email
                 );
               }
             } catch (emailError) {
