@@ -848,8 +848,10 @@ export const getDashboardAnalytics = async (req, res) => {
 // Get Super Admin specific analytics
 export const getSuperAdminAnalytics = async (req, res) => {
   try {
+    console.log('getSuperAdminAnalytics called with query:', req.query);
     const { days = 30, companyId, plantId } = req.query;
     const { start, end } = getDateRange(parseInt(days));
+    console.log('Date range calculated:', start, 'to', end);
 
     // Base filters
     let submissionFilter = { submittedAt: { $gte: start, $lte: end } };
@@ -858,14 +860,17 @@ export const getSuperAdminAnalytics = async (req, res) => {
     let formFilter = { createdAt: { $gte: start, $lte: end } };
 
     if (companyId) {
+      console.log('Applying company filter:', companyId);
       submissionFilter.companyId = new mongoose.Types.ObjectId(companyId);
       plantFilter.companyId = new mongoose.Types.ObjectId(companyId);
       formFilter.companyId = new mongoose.Types.ObjectId(companyId);
     }
     if (plantId) {
+      console.log('Applying plant filter:', plantId);
       submissionFilter.plantId = new mongoose.Types.ObjectId(plantId);
       formFilter.plantId = new mongoose.Types.ObjectId(plantId);
     }
+    console.log('Filters prepared:', { submissionFilter, companyFilter, plantFilter, formFilter });
 
     const [
       totalCompanies,
@@ -882,9 +887,9 @@ export const getSuperAdminAnalytics = async (req, res) => {
       Plant.countDocuments(plantFilter),
       Form.countDocuments(formFilter),
       FormSubmission.countDocuments(submissionFilter),
-      FormSubmission.countDocuments({ ...submissionFilter, status: "approved" }),
-      FormSubmission.countDocuments({ ...submissionFilter, status: "rejected" }),
-      FormSubmission.countDocuments({ ...submissionFilter, status: "pending" }),
+      FormSubmission.countDocuments({ ...submissionFilter, status: "APPROVED" }),
+      FormSubmission.countDocuments({ ...submissionFilter, status: "REJECTED" }),
+      FormSubmission.countDocuments({ ...submissionFilter, status: "PENDING_APPROVAL" }),
       // Company breakdown for table
       (async () => {
         const companies = await Company.find().lean();
@@ -915,23 +920,35 @@ export const getSuperAdminAnalytics = async (req, res) => {
         // Create maps for quick lookup
         const plantCountMap = {};
         plantCounts.forEach(item => {
-          plantCountMap[item._id.toString()] = item.count;
+          if (item._id) {  // Skip null/undefined IDs
+            plantCountMap[item._id.toString()] = item.count;
+          }
         });
         
         const formCountMap = {};
         formCounts.forEach(item => {
-          formCountMap[item._id.toString()] = item.count;
+          if (item._id) {  // Skip null/undefined IDs
+            formCountMap[item._id.toString()] = item.count;
+          }
         });
         
         const submissionCountMap = {};
         submissionCounts.forEach(item => {
-          submissionCountMap[item._id.toString()] = item;
+          if (item._id) {  // Skip null/undefined IDs
+            submissionCountMap[item._id.toString()] = item;
+          }
         });
         
         return companies.map(comp => {
-          const plantsCount = plantCountMap[comp._id.toString()] || 0;
-          const formsCount = formCountMap[comp._id.toString()] || 0;
-          const subs = submissionCountMap[comp._id.toString()] || { total: 0, approved: 0, rejected: 0, pending: 0 };
+          // Skip companies with null/undefined IDs
+          if (!comp._id) {
+            return null;
+          }
+          
+          const compIdStr = comp._id.toString();
+          const plantsCount = plantCountMap[compIdStr] || 0;
+          const formsCount = formCountMap[compIdStr] || 0;
+          const subs = submissionCountMap[compIdStr] || { total: 0, approved: 0, rejected: 0, pending: 0 };
           
           const total = subs.total;
           
@@ -945,7 +962,7 @@ export const getSuperAdminAnalytics = async (req, res) => {
             pendingPercent: total > 0 ? parseFloat(((subs.pending / total) * 100).toFixed(1)) : 0,
             rejectedPercent: total > 0 ? parseFloat(((subs.rejected / total) * 100).toFixed(1)) : 0
           };
-        });
+        }).filter(Boolean); // Remove any null entries
       })(),
       // Submissions over time
       (async () => {
@@ -997,6 +1014,8 @@ export const getSuperAdminAnalytics = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('Error in getSuperAdminAnalytics:', error);
+    console.error('Error stack:', error.stack);
     sendResponse(res, 500, "Error fetching Super Admin analytics", null, error.message);
   }
 };

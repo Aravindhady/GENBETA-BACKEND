@@ -61,9 +61,12 @@ export const assignTemplateToEmployees = async (req, res) => {
 
     await Assignment.insertMany(assignments);
 
+    const successMessage = `Successfully assigned ${ids.length} templates to ${employeeIds.length} employees`;
+    console.log("Assignment success message:", successMessage);
+    
     res.status(201).json({
       success: true,
-      message: `Successfully assigned ${ids.length} templates to ${employeeIds.length} employees`,
+      message: successMessage,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
